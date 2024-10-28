@@ -67,7 +67,7 @@ By examining the median and mean of the table, we observe that most of the graph
 - We used one-hot encoding for atomic number feature.
 - Updated implmentation to load data in batches by utilizing pytorch Dataset efficiently.
 - We added "self-loops," meaning that each node uses its own features along with its neighbours when calculating the hidden state. In other words, we treat a node and its neighbors identically.
-- Early stopping was implemented to prevent overfitting, with a patience of 20 epochs. This means that if the validation ROC does not exceed its previous maximum after 20 epochs, training stops, and we revert to the best model saved up to that point.
+- Early stopping was implemented to prevent overfitting, with a patience of 10 epochs. This means that if the validation ROC does not exceed its previous maximum after 10 epochs, training stops, and we revert to the best model saved up to that point.
 - We set the seed for the random libraries used to get replicable results.
 - We initially applied Xavier initialization, but later switched to the default initialization, which provided a slight improvement in the test ROC.
 - We used ChatGPT and Claude to suggest optimizations and improvements for code, and clarify language for documentation.
