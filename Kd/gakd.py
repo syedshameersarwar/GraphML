@@ -525,6 +525,7 @@ def run_multiple_experiments(
                 virtual_node=True,
                 train_vn_eps=False,
                 vn_eps=0.0,
+                return_embeddings=True,
             )
         else:
             student_model = GINENetwork(
@@ -532,6 +533,7 @@ def run_multiple_experiments(
                 out_dim=dataset_name.num_tasks,
                 num_layers=3,
                 dropout=0.5,
+                return_embeddings=True,
             )
         seed = 42 + run
         trainer = GAKD_trainer(
