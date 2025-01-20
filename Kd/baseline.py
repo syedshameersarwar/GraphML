@@ -162,8 +162,10 @@ class GINENetwork(nn.Module):
         virtual_node=False,
         train_vn_eps=False,
         vn_eps=0.0,
+        return_embeddings=False,
     ):
         super().__init__()
+        self.return_embeddings = return_embeddings
         convs = [
             ConvBlock(
                 hidden_dim,
@@ -199,6 +201,9 @@ class GINENetwork(nn.Module):
         if self.virtual_node:
             data.virtual_node = self.v0.expand(data.num_graphs, self.v0.shape[-1])
         H = self.network(data)
+        if self.return_embeddings:
+            # logits, embeddings
+            return self.aggregate(H), H
         return self.aggregate(H)
 
 
