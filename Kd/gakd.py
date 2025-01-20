@@ -432,9 +432,9 @@ class GAKD_trainer:
         return student_loss.item()
 
     def train(self):
-        self.student_model.train()
-
+        best_valid_ap = 0
         for epoch in range(self.epochs):
+            self.student_model.train()
             train_loss = 0
             for batch in self.train_loader:
                 batch_loss = self._train_batch(batch, epoch)
