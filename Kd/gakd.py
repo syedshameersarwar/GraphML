@@ -13,6 +13,7 @@ from ogb.graphproppred import PygGraphPropPredDataset, Evaluator
 from baseline import GINENetwork
 import pandas as pd
 from datetime import datetime
+import torch_geometric.nn as nng
 
 base_dir = f"/scratch1/users/u12763/Knowledge-distillation/"
 if not os.path.exists(base_dir):
@@ -79,37 +80,50 @@ def load_knowledge(kd_path, device):  # load teacher knowledge
     return tea_logits, tea_h, tea_g, new_ptr
 
 
+class AddGraphIdTransform:
+    def __init__(self):
+        self.graph_id = 0
+
+    def __call__(self, data):
+        data.graph_id = self.graph_id
+        self.graph_id += 1
+        return data
+
+
 class GAKD_trainer:
 
     def __init__(
         self,
-        student_model: nn.Module,
+        student_model_args: dict,
         teacher_knowledge_path: str,
         dataset_name="ogbg-molpcba",
-        embedding_dim=400,
-        student_lr=5e-3,
-        student_weight_decay=1e-5,
-        discriminator_lr=1e-2,
-        discriminator_weight_decay=5e-4,
+        student_optimizer_lr=5e-3,
+        student_optimizer_weight_decay=1e-5,
+        discriminator_optimizer_lr=1e-2,
+        discriminator_optimizer_weight_decay=5e-4,
         batch_size=32,
         num_workers=4,
         discriminator_update_freq=5,  # K in paper
+        train_discriminator_logits=True,
+        train_discriminator_embeddings=True,
         epochs=100,
         seed=42,
     ):
         self.seed = seed
         self.dataset_name = dataset_name
-        self.student_model = student_model
+        self.student_model_args = student_model_args
         self.teacher_knowledge_path = teacher_knowledge_path
-        self.embedding_dim = embedding_dim
-        self.student_lr = student_lr
-        self.student_weight_decay = student_weight_decay
-        self.discriminator_lr = discriminator_lr
-        self.discriminator_weight_decay = discriminator_weight_decay
+        self.embedding_dim = student_model_args["embedding_dim"]
+        self.student_lr = student_optimizer_lr
+        self.student_weight_decay = student_optimizer_weight_decay
+        self.discriminator_lr = discriminator_optimizer_lr
+        self.discriminator_weight_decay = discriminator_optimizer_weight_decay
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.epochs = epochs
         self.discriminator_update_freq = discriminator_update_freq
+        self.train_discriminator_logits = train_discriminator_logits
+        self.train_discriminator_embeddings = train_discriminator_embeddings
         self.setup()
 
     def setup(self):
@@ -117,14 +131,41 @@ class GAKD_trainer:
         self._set_seed(self.seed)
         self._load_knowledge()
         self._load_dataset()
-        self._setup_student()
+        self._configure_student_model()
+        self._setup_student_optimizer()
         self._setup_discriminator()
         self.evaluate_teacher()
 
+    def _configure_student_model(self):
+        if self.student_model_args is not None:
+            if self.student_model_args["embedding_dim"] is None:
+                self.student_model_args["embedding_dim"] = self._teacher_h_dim
+                self.embedding_dim = self._teacher_h_dim
+            else:
+                assert (
+                    self.student_model_args["embedding_dim"] == self._teacher_h_dim
+                ), "Embedding dimension mismatch between teacher and student"
+            if self.student_model_args["out_dim"] is None:
+                self.student_model_args["out_dim"] = self.dataset.num_tasks
+
+        self.student_model = GINENetwork(
+            hidden_dim=self.student_model_args["hidden_dim"],
+            out_dim=self.student_model_args["out_dim"],
+            num_layers=self.student_model_args["num_layers"],
+            dropout=self.student_model_args["dropout"],
+            virtual_node=self.student_model_args["virtual_node"],
+            train_vn_eps=self.student_model_args["train_vn_eps"],
+            vn_eps=self.student_model_args["vn_eps"],
+            return_embeddings=True,
+        )
+
     def _load_dataset(self):
         os.makedirs(f"{base_dir}/data", exist_ok=True)
+        self._transform = AddGraphIdTransform()
         self.dataset = PygGraphPropPredDataset(
-            name=self.dataset_name, root=f"{base_dir}/data"
+            name=self.dataset_name,
+            root=f"{base_dir}/data",
+            pre_transform=self._transform,
         )
         self.split_idx = self.dataset.get_idx_split()
 
@@ -152,7 +193,7 @@ class GAKD_trainer:
 
         self.evaluator = Evaluator(name=self.dataset_name)
 
-    def _setup_student(self):
+    def _setup_student_optimizer(self):
         self.student_model = self.student_model.to(self.device)
         self.student_optimizer = optim.Adam(
             self.student_model.parameters(),
@@ -193,7 +234,7 @@ class GAKD_trainer:
         )
         self.discriminator_loss = torch.nn.BCELoss()
         self.class_criterion = torch.nn.BCEWithLogitsLoss()
-        self._trains_ids = self.split_idx["train"].to(self.device)
+        self._train_ids = self.split_idx["train"].to(self.device)
 
     def _set_device(self):
         if torch.cuda.is_available():
@@ -206,14 +247,21 @@ class GAKD_trainer:
         print(f"Using device: {device}", flush=True)
         self.device = device
 
-    def _load_knowledge(self, teacher_model_path):
+    def _load_knowledge(self):
+        print(self.teacher_knowledge_path, os.path.isfile(self.teacher_knowledge_path))
         assert os.path.isfile(
             self.teacher_knowledge_path
         ), "Please download teacher knowledge first"
         knowledge = torch.load(self.teacher_knowledge_path, map_location=self.device)
         self.teacher_logits = knowledge["logits"].float().to(self.device)
+        print("Teacher logits Dimension: ", self.teacher_logits.shape, flush=True)
+        self._teacher_logits_dim = self.teacher_logits.shape[1]
         self.teacher_h = knowledge["h-embedding"].to(self.device)
+        print("Teacher h (embedding) dimension: ", self.teacher_h.shape, flush=True)
+        self._teacher_h_dim = self.teacher_h.shape[1]
         self.teacher_g = knowledge["g-embedding"].to(self.device)
+        print("Teacher g (summary) dimension: ", self.teacher_g.shape, flush=True)
+        self._teacher_g_dim = self.teacher_g.shape[1]
         self.teacher_ptr = knowledge["ptr"].to(self.device)
 
     def evaluate_teacher(self):
@@ -245,7 +293,10 @@ class GAKD_trainer:
     def _get_batch_idx_from_teacher(self, batch):
         new_pre = self.teacher_ptr[:-1]
         new_post = self.teacher_ptr[1:]
-        new_ids = [(self._trains_ids == vid).nonzero().item() for vid in batch.id]
+        new_ids = [
+            (self._train_ids == batch.graph_id[vid]).nonzero().item()
+            for vid in batch.batch
+        ]
         batch_graph_idx = torch.tensor(new_ids, device=self.device)
         batch_pre = new_pre[batch_graph_idx]
         batch_post = new_post[batch_graph_idx]
@@ -256,14 +307,15 @@ class GAKD_trainer:
             ],
             dim=0,
         )
-        return batch_graph_idx, batch_node_idx
+        return torch.unique(batch_graph_idx, sorted=True), batch_node_idx
 
     def _train_batch(self, batch, epoch):
         batch = batch.to(self.device)
         if batch.x.shape[0] == 1 or batch.batch[-1] == 0:
-            return
+            return 0
 
-        student_batch_pred, student_batch_h, student_batch_g = self.student_model(batch)
+        student_batch_pred, student_batch_h = self.student_model(batch)
+        student_batch_g = nng.global_mean_pool(student_batch_h, batch.batch)
         self.student_optimizer.zero_grad()
         y_true = batch.y.float()
         y_labeled = ~torch.isnan(y_true)
@@ -283,81 +335,82 @@ class GAKD_trainer:
             discriminator_loss = 0
 
             ## train logits identifier: D_l
-            self.discriminator_logits.train()
-            # detach student logits to avoid backprop through student for discriminator training
-            student_logits = student_batch_pred.detach()
-            z_teacher = self.discriminator_logits(teacher_batch_logits)
-            z_student = self.discriminator_logits(student_logits)
-            prob_real_given_z = torch.sigmoid(z_teacher[:, -1])
-            prob_fake_given_z = torch.sigmoid(z_student[:, -1])
-            adversarial_logits_loss = self.discriminator_loss(
-                prob_real_given_z, torch.ones_like(prob_real_given_z)
-            ) + self.discriminator_loss(
-                prob_fake_given_z, torch.zeros_like(prob_fake_given_z)
-            )
-            y_v_given_z_pos = self.class_criterion(
-                z_teacher[:, -1][y_labeled], y_true[y_labeled]
-            )
-            y_v_given_z_neg = self.class_criterion(
-                z_student[:, -1][y_labeled], y_true[y_labeled]
-            )
-            label_loss = y_v_given_z_pos + y_v_given_z_neg
-            discriminator_loss = 0.5 * (adversarial_logits_loss + label_loss)
+            if self.train_discriminator_logits:
+                self.discriminator_logits.train()
+                # detach student logits to avoid backprop through student for discriminator training
+                student_logits = student_batch_pred.detach()
+                z_teacher = self.discriminator_logits(teacher_batch_logits)
+                z_student = self.discriminator_logits(student_logits)
+                prob_real_given_z = torch.sigmoid(z_teacher[:, -1])
+                prob_fake_given_z = torch.sigmoid(z_student[:, -1])
+                adversarial_logits_loss = self.discriminator_loss(
+                    prob_real_given_z, torch.ones_like(prob_real_given_z)
+                ) + self.discriminator_loss(
+                    prob_fake_given_z, torch.zeros_like(prob_fake_given_z)
+                )
+                y_v_given_z_pos = self.class_criterion(
+                    z_teacher[:, :-1][y_labeled], y_true[y_labeled]
+                )
+                y_v_given_z_neg = self.class_criterion(
+                    z_student[:, :-1][y_labeled], y_true[y_labeled]
+                )
+                label_loss = y_v_given_z_pos + y_v_given_z_neg
+                discriminator_loss += 0.5 * (adversarial_logits_loss + label_loss)
 
             ## train local embedding representation identifier: D_e_local
-            self.discriminator_e_local.train()
-            pos_e = self.discriminator_e_local(teacher_batch_h, batch)
-            neg_e = self.discriminator_e_local(student_batch_h, batch)
-            prob_real_given_e = torch.sigmoid(pos_e)
-            prob_fake_given_e = torch.sigmoid(neg_e)
-            adverserial_local_e_loss = self.discriminator_loss(
-                prob_real_given_e, torch.ones_like(prob_real_given_e)
-            ) + self.discriminator_loss(
-                prob_fake_given_e, torch.zeros_like(prob_fake_given_e)
-            )
+            if self.train_discriminator_embeddings:
+                self.discriminator_e_local.train()
+                pos_e = self.discriminator_e_local(teacher_batch_h, batch)
+                neg_e = self.discriminator_e_local(student_batch_h.detach(), batch)
+                prob_real_given_e = torch.sigmoid(pos_e)
+                prob_fake_given_e = torch.sigmoid(neg_e)
+                adverserial_local_e_loss = self.discriminator_loss(
+                    prob_real_given_e, torch.ones_like(prob_real_given_e)
+                ) + self.discriminator_loss(
+                    prob_fake_given_e, torch.zeros_like(prob_fake_given_e)
+                )
 
-            ## train global embedding representation identifier: D_e_global
-            self.discriminator_e_global.train()
-            teacher_summary = torch.sigmoid(teacher_batch_g)
-            e_teacher_summary_teacher = self.discriminator_e_global(
-                teacher_batch_h, teacher_summary, batch
-            )
-            e_student_summary_teacher = self.discriminator_e_global(
-                student_batch_h.detach(), teacher_summary, batch
-            )
-            prob_real_given_e_global = torch.sigmoid(e_teacher_summary_teacher)
-            prob_fake_given_e_global = torch.sigmoid(e_student_summary_teacher)
-            adverserial_global_e_loss1 = self.discriminator_loss(
-                prob_real_given_e_global,
-                torch.ones_like(prob_real_given_e_global),
-            ) + self.discriminator_loss(
-                prob_fake_given_e_global,
-                torch.zeros_like(prob_fake_given_e_global),
-            )
+                ## train global embedding representation identifier: D_e_global
+                self.discriminator_e_global.train()
+                teacher_summary = torch.sigmoid(teacher_batch_g)
+                e_teacher_summary_teacher = self.discriminator_e_global(
+                    teacher_batch_h, teacher_summary, batch
+                )
+                e_student_summary_teacher = self.discriminator_e_global(
+                    student_batch_h.detach(), teacher_summary, batch
+                )
+                prob_real_given_e_global = torch.sigmoid(e_teacher_summary_teacher)
+                prob_fake_given_e_global = torch.sigmoid(e_student_summary_teacher)
+                adverserial_global_e_loss1 = self.discriminator_loss(
+                    prob_real_given_e_global,
+                    torch.ones_like(prob_real_given_e_global),
+                ) + self.discriminator_loss(
+                    prob_fake_given_e_global,
+                    torch.zeros_like(prob_fake_given_e_global),
+                )
 
-            student_summary = torch.sigmoid(student_batch_g)
-            e_student_summary_student = self.discriminator_e_global(
-                student_batch_h.detach(), student_summary.detach(), batch
-            )
-            e_teacher_summary_student = self.discriminator_e_global(
-                teacher_batch_h, student_summary.detach(), batch
-            )
-            prob_real_given_e_global = torch.sigmoid(e_student_summary_student)
-            prob_fake_given_e_global = torch.sigmoid(e_teacher_summary_student)
-            adverserial_global_e_loss2 = self.discriminator_loss(
-                prob_real_given_e_global,
-                torch.ones_like(prob_real_given_e_global),
-            ) + self.discriminator_loss(
-                prob_fake_given_e_global,
-                torch.ones_like(prob_fake_given_e_global),
-            )
-
-            discriminator_loss = (
-                discriminator_loss
-                + adverserial_local_e_loss
-                + adverserial_global_e_loss1
-                + adverserial_global_e_loss2
-            )
+                student_summary = torch.sigmoid(student_batch_g)
+                e_student_summary_student = self.discriminator_e_global(
+                    student_batch_h.detach(), student_summary.detach(), batch
+                )
+                e_teacher_summary_student = self.discriminator_e_global(
+                    teacher_batch_h, student_summary.detach(), batch
+                )
+                prob_real_given_e_global = torch.sigmoid(e_student_summary_student)
+                prob_fake_given_e_global = torch.sigmoid(e_teacher_summary_student)
+                adverserial_global_e_loss2 = self.discriminator_loss(
+                    prob_real_given_e_global,
+                    torch.ones_like(prob_real_given_e_global),
+                ) + self.discriminator_loss(
+                    prob_fake_given_e_global,
+                    torch.ones_like(prob_fake_given_e_global),
+                )
+                discriminator_loss = (
+                    discriminator_loss
+                    + adverserial_local_e_loss
+                    + adverserial_global_e_loss1
+                    + adverserial_global_e_loss2
+                )
             self.discriminator_optimizer.zero_grad()
             discriminator_loss.backward()
             self.discriminator_optimizer.step()
@@ -366,64 +419,66 @@ class GAKD_trainer:
         student_loss = class_loss
 
         ## fooling logits discriminator
-        self.discriminator_logits.eval()
-        z_teacher = self.discriminator_logits(teacher_batch_logits)
-        z_student = self.discriminator_logits(student_batch_pred)
-        prob_fake_given_z = torch.sigmoid(z_student[:, -1])
-        adversarial_logits_loss = self.discriminator_loss(
-            prob_fake_given_z, torch.ones_like(prob_fake_given_z)
-        )
-        label_loss = self.class_criterion(
-            z_student[:, -1][y_labeled], y_true[y_labeled]
-        )
-        l1_loss = (
-            torch.norm(student_batch_pred - teacher_batch_logits, p=1)
-            * 1
-            / len(batch.id)
-        )
-        student_loss = (
-            student_loss + 0.5 * (adversarial_logits_loss + label_loss) + l1_loss
-        )
+        if self.train_discriminator_logits:
+            self.discriminator_logits.eval()
+            z_teacher = self.discriminator_logits(teacher_batch_logits)
+            z_student = self.discriminator_logits(student_batch_pred)
+            prob_fake_given_z = torch.sigmoid(z_student[:, -1])
+            adversarial_logits_loss = self.discriminator_loss(
+                prob_fake_given_z, torch.ones_like(prob_fake_given_z)
+            )
+            label_loss = self.class_criterion(
+                z_student[:, :-1][y_labeled], y_true[y_labeled]
+            )
+            l1_loss = (
+                torch.norm(student_batch_pred - teacher_batch_logits, p=1)
+                * 1
+                / len(batch.batch)
+            )
+            student_loss = (
+                student_loss + 0.5 * (adversarial_logits_loss + label_loss) + l1_loss
+            )
 
         ## fooling local embedding representation identifier
-        self.discriminator_e_local.eval()
-        neg_e = self.discriminator_e_local(student_batch_h, batch)
-        prob_fake_given_e = torch.sigmoid(neg_e)
-        adversarial_local_e_loss = self.discriminator_loss(
-            prob_fake_given_e, torch.ones_like(prob_fake_given_e)
-        )
+        if self.train_discriminator_embeddings:
+            self.discriminator_e_local.eval()
+            neg_e = self.discriminator_e_local(student_batch_h, batch)
+            prob_fake_given_e = torch.sigmoid(neg_e)
+            adversarial_local_e_loss = self.discriminator_loss(
+                prob_fake_given_e, torch.ones_like(prob_fake_given_e)
+            )
 
-        ## fooling global embedding representation identifier
-        self.discriminator_e_global.eval()
-        teacher_summary = torch.sigmoid(teacher_batch_g)
-        e_student_summary_teacher = self.discriminator_e_global(
-            student_batch_h, teacher_summary, batch
-        )
-        prob_fake_given_e_global = torch.sigmoid(e_student_summary_teacher)
-        adverserial_global_e_loss1 = self.discriminator_loss(
-            prob_fake_given_e_global, torch.ones_like(prob_fake_given_e_global)
-        )
+            ## fooling global embedding representation identifier
+            self.discriminator_e_global.eval()
+            teacher_summary = torch.sigmoid(teacher_batch_g)
+            e_student_summary_teacher = self.discriminator_e_global(
+                student_batch_h, teacher_summary, batch
+            )
+            prob_fake_given_e_global = torch.sigmoid(e_student_summary_teacher)
+            adverserial_global_e_loss1 = self.discriminator_loss(
+                prob_fake_given_e_global, torch.ones_like(prob_fake_given_e_global)
+            )
 
-        student_summary = torch.sigmoid(student_batch_g)
-        e_teacher_summary_student = self.discriminator_e_global(
-            teacher_batch_h, student_summary, batch
-        )
-        e_student_summary_student = self.discriminator_e_global(
-            student_batch_h, student_summary, batch
-        )
-        prob_real_given_e_global = torch.sigmoid(e_student_summary_student)
-        prob_fake_given_e_global = torch.sigmoid(e_teacher_summary_student)
-        adverserial_global_e_loss2 = self.discriminator_loss(
-            prob_real_given_e_global, torch.zeros_like(prob_real_given_e_global)
-        ) + self.discriminator_loss(
-            prob_fake_given_e_global, torch.ones_like(prob_fake_given_e_global)
-        )
-        student_loss = (
-            student_loss
-            + adversarial_local_e_loss
-            + adverserial_global_e_loss1
-            + adverserial_global_e_loss2
-        )
+            student_summary = torch.sigmoid(student_batch_g)
+            e_teacher_summary_student = self.discriminator_e_global(
+                teacher_batch_h, student_summary, batch
+            )
+            e_student_summary_student = self.discriminator_e_global(
+                student_batch_h, student_summary, batch
+            )
+            prob_real_given_e_global = torch.sigmoid(e_student_summary_student)
+            prob_fake_given_e_global = torch.sigmoid(e_teacher_summary_student)
+            adverserial_global_e_loss2 = self.discriminator_loss(
+                prob_real_given_e_global, torch.zeros_like(prob_real_given_e_global)
+            ) + self.discriminator_loss(
+                prob_fake_given_e_global, torch.ones_like(prob_fake_given_e_global)
+            )
+            student_loss = (
+                student_loss
+                + adversarial_local_e_loss
+                + adverserial_global_e_loss1
+                + adverserial_global_e_loss2
+            )
 
         self.student_optimizer.zero_grad()
         student_loss.backward()
@@ -469,7 +524,7 @@ class GAKD_trainer:
             if batch.x.shape[0] == 1:
                 continue
             with torch.no_grad():
-                y_pred = self.student_model(batch)
+                y_pred, _ = self.student_model(batch)
             y_true_list.append(batch.y.view(y_pred.shape).detach().cpu())
             y_pred_list.append(y_pred.detach().cpu())
 
@@ -501,53 +556,37 @@ def run_multiple_experiments(
     dataset_name="ogbg-molpcba",
     n_runs=5,
     include_vn_student=True,
-    embedding_dim=400,
-    student_lr=5e-3,
-    student_weight_decay=1e-5,
-    discriminator_lr=1e-2,
-    discriminator_weight_decay=5e-4,
+    student_optimizer_lr=5e-3,
+    student_optimizer_weight_decay=1e-5,
+    discriminator_optimizer_lr=1e-2,
+    discriminator_optimizer_weight_decay=5e-4,
     batch_size=32,
     num_workers=4,
     discriminator_update_freq=5,
     epochs=100,
+    train_discriminator_logits=True,
+    train_discriminator_embeddings=True,
     output_file=f"{base_dir}/results/gine_student_gakd_molpcba.csv",
+    student_model_args=None,
 ):
     results = []
     metric = "ap" if dataset_name == "ogbg-molpcba" else "rocauc"
     for run in range(n_runs):
         print(f"\nStarting Run {run + 1}/{n_runs}", flush=True)
-        if include_vn_student:
-            student_model = GINENetwork(
-                hidden_dim=embedding_dim,
-                out_dim=dataset_name.num_tasks,
-                num_layers=3,
-                dropout=0.5,
-                virtual_node=True,
-                train_vn_eps=False,
-                vn_eps=0.0,
-                return_embeddings=True,
-            )
-        else:
-            student_model = GINENetwork(
-                hidden_dim=embedding_dim,
-                out_dim=dataset_name.num_tasks,
-                num_layers=3,
-                dropout=0.5,
-                return_embeddings=True,
-            )
         seed = 42 + run
         trainer = GAKD_trainer(
-            student_model=student_model,
+            student_model_args=student_model_args,
             teacher_knowledge_path=teacher_knowledge_path,
             dataset_name=dataset_name,
-            embedding_dim=embedding_dim,
-            student_lr=student_lr,
-            student_weight_decay=student_weight_decay,
-            discriminator_lr=discriminator_lr,
-            discriminator_weight_decay=discriminator_weight_decay,
+            student_optimizer_lr=student_optimizer_lr,
+            student_optimizer_weight_decay=student_optimizer_weight_decay,
+            discriminator_optimizer_lr=discriminator_optimizer_lr,
+            discriminator_optimizer_weight_decay=discriminator_optimizer_weight_decay,
             batch_size=batch_size,
             num_workers=num_workers,
             discriminator_update_freq=discriminator_update_freq,
+            train_discriminator_logits=train_discriminator_logits,
+            train_discriminator_embeddings=train_discriminator_embeddings,
             epochs=epochs,
             seed=seed,
         )
@@ -556,18 +595,25 @@ def run_multiple_experiments(
         valid_ap = trainer.evaluate(split="valid")
         test_ap = trainer.evaluate(split="test")
         run_results = {
-            "experiment_id": f"student_gine_gakd_{dataset_name}_{include_vn_student}_{datetime.now().strftime("%Y%m%d_%H%M%S")}",
+            "experiment_id": f"student_gine_gakd_{dataset_name}_{include_vn_student}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
             "dataset_name": dataset_name,
             "run": run + 1,
-            "hidden_dim": embedding_dim,
-            "virtual_node": include_vn_student,
-            "n_params": numel(trainer.model, only_trainable=True),
-            "lr": trainer.student_lr,
+            "train_discriminator_logits": train_discriminator_logits,
+            "train_discriminator_embeddings": train_discriminator_embeddings,
+            "n_params": numel(trainer.student_model, only_trainable=True),
+            "lr": student_optimizer_lr,
+            "weight_decay": student_optimizer_weight_decay,
+            "discriminator_lr": discriminator_optimizer_lr,
+            "discriminator_weight_decay": discriminator_optimizer_weight_decay,
             "batch_size": trainer.batch_size,
             "epochs": trainer.epochs,
             "valid_metric": valid_ap,
             "test_metric": test_ap,
             "metric": metric,
+            "discriminator_update_freq": discriminator_update_freq,
+            "train_discriminator_logits": train_discriminator_logits,
+            "train_discriminator_embeddings": train_discriminator_embeddings,
+            "student_model_args": json.dumps(student_model_args),
         }
         results.append(run_results)
 
@@ -600,13 +646,11 @@ if __name__ == "__main__":
         description="Run GINE experiments with or without virtual nodes under GAKD framework"
     )
     parser.add_argument(
-        "--virtual_node",
-        type=str,
-        choices=["true", "false"],
-        default="true",
-        help="Whether to use virtual nodes in the student model",
+        "--n_runs",
+        type=int,
+        default=5,
+        help="Number of runs to run experiments",
     )
-
     parser.add_argument(
         "--dataset_name",
         type=str,
@@ -621,23 +665,159 @@ if __name__ == "__main__":
         default=f"{base_dir}/teacher_knowledge/teacher_knowledge_ogbg-molpcba.tar",
         help="Path to the teacher knowledge",
     )
+    parser.add_argument(
+        "--student_embedding_dim",
+        type=int,
+        default=None,
+        help="Embedding dimension for the student model, if None, use the dimension of the teacher model",
+    )
+    parser.add_argument(
+        "--student_out_dim",
+        type=int,
+        default=None,
+        help="Output dimension for the student model, if None, use the dimension of the teacher model",
+    )
+    parser.add_argument(
+        "--student_num_layers",
+        type=int,
+        default=5,
+        help="Number of layers for the student model, if None, use the number of layers of the teacher model",
+    )
+    parser.add_argument(
+        "--student_dropout",
+        type=float,
+        default=0.5,
+        help="Dropout rate for the student model",
+    )
+    parser.add_argument(
+        "--student_virtual_node",
+        type=str,
+        choices=["true", "false"],
+        default="true",
+        help="Whether to use virtual nodes in the student model",
+    )
+    parser.add_argument(
+        "--student_train_vn_eps",
+        type=str,
+        choices=["true", "false"],
+        default="false",
+        help="Whether to train the virtual node epsilon in the student model",
+    )
+    parser.add_argument(
+        "--student_vn_eps",
+        type=float,
+        default=0.0,
+        help="Virtual node epsilon for the student model",
+    )
+    parser.add_argument(
+        "--student_optimizer_lr",
+        type=float,
+        default=5e-3,
+        help="Learning rate for the student model",
+    )
+    parser.add_argument(
+        "--student_optimizer_weight_decay",
+        type=float,
+        default=1e-5,
+        help="Weight decay for the student model",
+    )
+    parser.add_argument(
+        "--discriminator_optimizer_lr",
+        type=float,
+        default=1e-2,
+        help="Learning rate for the discriminator",
+    )
+    parser.add_argument(
+        "--discriminator_optimizer_weight_decay",
+        type=float,
+        default=5e-4,
+        help="Weight decay for the discriminator",
+    )
+    parser.add_argument(
+        "--discriminator_update_freq",
+        type=int,
+        default=1,
+        help="Frequency of discriminator updates",
+    )
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=100,
+        help="Number of epochs to train the student model",
+    )
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=32,
+        help="Batch size for training",
+    )
+    parser.add_argument(
+        "--num_workers",
+        type=int,
+        default=4,
+        help="Number of workers for data loading",
+    )
+
+    parser.add_argument(
+        "--train_discriminator_logits",
+        type=str,
+        choices=["true", "false"],
+        default="true",
+        help="Whether to train the discriminator on logits",
+    )
+    parser.add_argument(
+        "--train_discriminator_embeddings",
+        type=str,
+        choices=["true", "false"],
+        default="true",
+        help="Whether to train the discriminator on embeddings",
+    )
+    parser.add_argument(
+        "--output_file",
+        type=str,
+        default=None,
+        help="Path to the output file",
+    )
 
     args = parser.parse_args()
-    virtual_node = args.virtual_node.lower() == "true"
-
+    virtual_node = args.student_virtual_node.lower() == "true"
+    student_args = {
+        "embedding_dim": args.student_embedding_dim,
+        "out_dim": args.student_out_dim,
+        "num_layers": args.student_num_layers,
+        "dropout": args.student_dropout,
+        "virtual_node": virtual_node,
+        "train_vn_eps": args.student_train_vn_eps.lower() == "true",
+        "vn_eps": args.student_vn_eps,
+    }
     os.makedirs(f"{base_dir}/results", exist_ok=True)
     experiment_type = "with" if virtual_node else "without"
     print(
-        f"Running experiments {experiment_type} Virtual Nodes for {args.dataset_name}",
+        f"Running experiments {experiment_type} Virtual Nodes for {args.dataset_name}, Train discriminator logits={args.train_discriminator_logits}, Train discriminator embeddings={args.train_discriminator_embeddings}",
         flush=True,
     )
+    if args.output_file is None:
+        file_name = f"{base_dir}/results/gine_student_gakd_{args.dataset_name}_{experiment_type}_discriminator_logits_{args.train_discriminator_logits}_discriminator_embeddings_{args.train_discriminator_embeddings}.csv"
+    else:
+        file_name = args.output_file
+
     results_df = run_multiple_experiments(
         args.teacher_knowledge_path,
         args.dataset_name,
-        n_runs=5,
-        include_vn_student=virtual_node,
-        output_file=f"{base_dir}/results/gine_student_gakd_{args.dataset_name}_{experiment_type}.csv",
+        n_runs=args.n_runs,
+        student_optimizer_lr=args.student_optimizer_lr,
+        student_optimizer_weight_decay=args.student_optimizer_weight_decay,
+        discriminator_optimizer_lr=args.discriminator_optimizer_lr,
+        discriminator_optimizer_weight_decay=args.discriminator_optimizer_weight_decay,
+        discriminator_update_freq=args.discriminator_update_freq,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        output_file=file_name,
+        train_discriminator_logits=args.train_discriminator_logits,
+        train_discriminator_embeddings=args.train_discriminator_embeddings,
+        student_model_args=student_args,
     )
+
     print(results_df.to_string(), flush=True)
     print("Experiments completed successfully!", flush=True)
-
