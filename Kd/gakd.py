@@ -256,13 +256,14 @@ class GAKD_trainer:
         self.teacher_logits = knowledge["logits"].float().to(self.device)
         print("Teacher logits Dimension: ", self.teacher_logits.shape, flush=True)
         self._teacher_logits_dim = self.teacher_logits.shape[1]
-        self.teacher_h = knowledge["h-embedding"].to(self.device)
+        self.teacher_h = knowledge["h-embeddings"].to(self.device)
         print("Teacher h (embedding) dimension: ", self.teacher_h.shape, flush=True)
         self._teacher_h_dim = self.teacher_h.shape[1]
-        self.teacher_g = knowledge["g-embedding"].to(self.device)
+        self.teacher_g = knowledge["g-embeddings"].to(self.device)
         print("Teacher g (summary) dimension: ", self.teacher_g.shape, flush=True)
         self._teacher_g_dim = self.teacher_g.shape[1]
         self.teacher_ptr = knowledge["ptr"].to(self.device)
+        print("Teacher ptr shape: ", self.teacher_ptr.shape, flush=True)
 
     def evaluate_teacher(self):
         train_y_true = self.dataset[self.split_idx["train"]].y
