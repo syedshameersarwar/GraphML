@@ -203,7 +203,7 @@ class GINENetwork(nn.Module):
         H = self.network(data)
         if self.return_embeddings:
             # logits, embeddings
-            return self.aggregate(H), H
+            return self.aggregate(H), H.x
         return self.aggregate(H)
 
 
