@@ -129,8 +129,8 @@ class GAKD_trainer:
     def setup(self):
         self._set_device()
         self._set_seed(self.seed)
-        self._load_knowledge()
         self._load_dataset()
+        self._load_knowledge()
         self._configure_student_model()
         self._setup_student_optimizer()
         self._setup_discriminator()
@@ -149,7 +149,7 @@ class GAKD_trainer:
                 self.student_model_args["out_dim"] = self.dataset.num_tasks
 
         self.student_model = GINENetwork(
-            hidden_dim=self.student_model_args["hidden_dim"],
+            hidden_dim=self.student_model_args["embedding_dim"],
             out_dim=self.student_model_args["out_dim"],
             num_layers=self.student_model_args["num_layers"],
             dropout=self.student_model_args["dropout"],
@@ -254,15 +254,36 @@ class GAKD_trainer:
         ), "Please download teacher knowledge first"
         knowledge = torch.load(self.teacher_knowledge_path, map_location=self.device)
         self.teacher_logits = knowledge["logits"].float().to(self.device)
+        self.teacher_logits = self.teacher_logits[self.split_idx["train"]]
         print("Teacher logits Dimension: ", self.teacher_logits.shape, flush=True)
         self._teacher_logits_dim = self.teacher_logits.shape[1]
-        self.teacher_h = knowledge["h-embeddings"].to(self.device)
-        print("Teacher h (embedding) dimension: ", self.teacher_h.shape, flush=True)
-        self._teacher_h_dim = self.teacher_h.shape[1]
         self.teacher_g = knowledge["g-embeddings"].to(self.device)
+        self.teacher_g = self.teacher_g[self.split_idx["train"]]
         print("Teacher g (summary) dimension: ", self.teacher_g.shape, flush=True)
         self._teacher_g_dim = self.teacher_g.shape[1]
         self.teacher_ptr = knowledge["ptr"].to(self.device)
+        self.teacher_h = knowledge["h-embeddings"].to(self.device)
+        pre, post = self.teacher_ptr[:-1], self.teacher_ptr[1:]
+        train_pre, train_post = (
+            pre[self.split_idx["train"]],
+            post[self.split_idx["train"]],
+        )
+        self.teacher_h_idx = torch.cat(
+            [
+                torch.arange(pre, post)
+                for pre, post in list(zip(*[train_pre, train_post]))
+            ],
+            dim=0,
+        )
+        self.teacher_h = self.teacher_h[self.teacher_h_idx]
+        self._teacher_h_dim = self.teacher_h.shape[1]
+        print("Teacher h (embedding) dimension: ", self.teacher_h.shape, flush=True)
+        nodes_count = torch.tensor(
+            [(post - pre).item() for pre, post in list(zip(train_pre, train_post))]
+        )
+        self.teacher_ptr = torch.cat(
+            [torch.tensor([0]), torch.cumsum(nodes_count, dim=0)]
+        ).to(self.device)
         print("Teacher ptr shape: ", self.teacher_ptr.shape, flush=True)
 
     def evaluate_teacher(self):
@@ -307,8 +328,10 @@ class GAKD_trainer:
                 for pre, post in list(zip(*[batch_pre, batch_post]))
             ],
             dim=0,
-        )
-        return torch.unique(batch_graph_idx, sorted=True), batch_node_idx
+        ).to(self.device)
+        return torch.unique_consecutive(batch_graph_idx).to(
+            self.device
+        ), batch_node_idx.to(self.device)
 
     def _train_batch(self, batch, epoch):
         batch = batch.to(self.device)
@@ -316,10 +339,13 @@ class GAKD_trainer:
             return 0
 
         student_batch_pred, student_batch_h = self.student_model(batch)
+        # print("Student batch pred: ", student_batch_pred.shape, flush=True)
+        # print("Student batch h: ", student_batch_h.shape, flush=True)
         student_batch_g = nng.global_mean_pool(student_batch_h, batch.batch)
         self.student_optimizer.zero_grad()
         y_true = batch.y.float()
-        y_labeled = ~torch.isnan(y_true)
+        # y_labeled = ~torch.isnan(y_true)
+        y_labeled = batch.y == batch.y
 
         # classification loss ===> to be used for logits identifier in training student
         class_loss = self.class_criterion(
@@ -490,9 +516,16 @@ class GAKD_trainer:
     def train(self):
         best_valid_ap = 0
         for epoch in range(self.epochs):
+            print("Epoch: ", epoch, flush=True)
             self.student_model.train()
             train_loss = 0
-            for batch in self.train_loader:
+            for batch_idx, batch in enumerate(self.train_loader):
+                print(
+                    "Processing training batch {}/{}, size: {}".format(
+                        batch_idx + 1, len(self.train_loader), batch.y.shape[0]
+                    ),
+                    flush=True,
+                )
                 batch_loss = self._train_batch(batch, epoch)
                 train_loss += batch_loss
 
@@ -822,3 +855,10 @@ if __name__ == "__main__":
 
     print(results_df.to_string(), flush=True)
     print("Experiments completed successfully!", flush=True)
+
+
+# srun --export=ALL --pty -p grete-h100 -G H100:1 --cpus-per-task=64 --ntasks=1 python gakd.py --teacher_knowledge_path /mnt/lustre-grete/projects/LLMticketsummarization/muneeb/rand_dir/GraphGPS/teacher_results/teacher-knowledge.pt --epochs 1 --batch_size 128
+# srun --export=ALL --pty -p grete-h100 -G H100:1 --cpus-per-task=64 --ntasks=1 python gakd.py --teacher_knowledge_path /mnt/lustre-grete/projects/LLMticketsummarization/muneeb/rand_dir/GraphGPS/teacher_results/teacher-knowledge.pt --student_virtual_node false  --epochs 1 --batch_size 128
+
+# srun --export=ALL --pty -p grete-h100 -G H100:1 --cpus-per-task=64 --ntasks=1 python gakd.py --teacher_knowledge_path /mnt/lustre-grete/projects/LLMticketsummarization/muneeb/rand_dir/GraphGPS/teacher_results/teacher-knowledge.pt --epochs 1 --train_discriminator_embeddings false
+# srun --export=ALL --pty -p grete-h100 -G H100:1 --cpus-per-task=64 --ntasks=1 python gakd.py --teacher_knowledge_path /mnt/lustre-grete/projects/LLMticketsummarization/muneeb/rand_dir/GraphGPS/teacher_results/teacher-knowledge.pt --epochs 1 --train_discriminator_logits false
