@@ -42,9 +42,6 @@ def set_seed(seed: int = 42) -> None:
     print(f"Random seed set as {seed}")
 
 
-set_seed()
-
-
 class MLP(nn.Module):
     def __init__(self, in_dim, out_dim):
         super().__init__()
@@ -366,6 +363,7 @@ def run_multiple_experiments(
     lr=0.001,
     batch_size=32,
     epochs=100,
+    seed=42,
     output_file="experiment_results.csv",
 ):
     """
@@ -382,6 +380,7 @@ def run_multiple_experiments(
         lr: Learning rate
         batch_size: Batch size
         epochs: Number of epochs
+        seed: Random seed
         output_file: Path to save results CSV
     """
 
@@ -395,7 +394,7 @@ def run_multiple_experiments(
         print(f"\nStarting Run {run + 1}/{n_runs}", flush=True)
 
         # Set different seed for each run
-        set_seed(42 + run)
+        set_seed(seed + run)
 
         # Initialize trainer
         trainer = GINETrainer(
@@ -470,13 +469,86 @@ if __name__ == "__main__":
         description="Run GINE experiments with or without virtual nodes"
     )
     parser.add_argument(
+        "--n_runs",
+        type=int,
+        default=5,
+        help="Number of runs",
+    )
+    parser.add_argument(
+        "--dataset_name",
+        type=str,
+        choices=["ogbg-molpcba", "ogbg-molhiv"],
+        default="ogbg-molpcba",
+        help="Dataset name",
+    )
+    parser.add_argument(
+        "--num_layers",
+        type=int,
+        default=5,
+        help="Number of GNN layers",
+    )
+    parser.add_argument(
+        "--hidden_dim",
+        type=int,
+        default=400,
+        help="Hidden dimension size",
+    )
+    parser.add_argument(
+        "--dropout",
+        type=float,
+        default=0.5,
+        help="Dropout rate",
+    )
+    parser.add_argument(
         "--virtual_node",
         type=str,
         choices=["true", "false"],
-        required=True,
+        default="true",
         help="Whether to run experiments with virtual nodes",
     )
-
+    parser.add_argument(
+        "--train_vn_eps",
+        type=str,
+        choices=["true", "false"],
+        default="false",
+        help="Whether to train virtual node epsilon",
+    )
+    parser.add_argument(
+        "--vn_eps",
+        type=float,
+        default=0.0,
+        help="Virtual node epsilon value",
+    )
+    parser.add_argument(
+        "--lr",
+        type=float,
+        default=0.001,
+        help="Learning rate",
+    )
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=32,
+        help="Batch size",
+    )
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=100,
+        help="Number of epochs",
+    )
+    parser.add_argument(
+        "--output_file",
+        type=str,
+        default=None,
+        help="Path to save results CSV",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed",
+    )
     args = parser.parse_args()
     virtual_node = args.virtual_node.lower() == "true"
 
@@ -486,23 +558,28 @@ if __name__ == "__main__":
     # Run experiments based on command line argument
     experiment_type = "with" if virtual_node else "without"
     print(
-        f"Running experiments {experiment_type} Virtual Nodes for ogbg-molpcba",
+        f"Running experiments {experiment_type} Virtual Nodes for {args.dataset_name}",
         flush=True,
     )
+    if args.output_file is None:
+        output_file = f"{base_dir}/results/gine_results_{args.dataset_name}_{'virtual_nodes' if virtual_node else 'no_virtual_nodes'}.csv"
+    else:
+        output_file = args.output_file
 
     results_df = run_multiple_experiments(
-        dataset_name="ogbg-molpcba",
-        n_runs=5,
-        num_layers=5,
-        hidden_dim=400,
-        dropout=0.5,
+        dataset_name=args.dataset_name,
+        n_runs=args.n_runs,
+        num_layers=args.num_layers,
+        hidden_dim=args.hidden_dim,
+        dropout=args.dropout,
         virtual_node=virtual_node,
-        train_vn_eps=False,
-        vn_eps=0.0,
-        lr=0.001,
-        batch_size=32,
-        epochs=100,
-        output_file=f"{base_dir}/results/gine_molpcba_results_{'virtual_nodes' if virtual_node else 'no_virtual_nodes'}.csv",
+        train_vn_eps=args.train_vn_eps.lower() == "true",
+        vn_eps=args.vn_eps,
+        lr=args.lr,
+        batch_size=args.batch_size,
+        epochs=args.epochs,
+        seed=args.seed,
+        output_file=output_file,
     )
 
     print(results_df.to_string(), flush=True)
