@@ -15,12 +15,23 @@ import pandas as pd
 from datetime import datetime
 import torch_geometric.nn as nng
 
-base_dir = f"/scratch1/users/u12763/Knowledge-distillation/"
+base_dir = os.getenv("BASE_DIR", "/scratch1/users/u12763/Knowledge-distillation/")
 if not os.path.exists(base_dir):
     os.makedirs(base_dir, exist_ok=True)
 
 
 class logits_D(nn.Module):
+    """
+    Logits Identifier (Section 3.3)
+    Purpose: Discriminate between student and teacher logits
+    Description: A simple MLP with residual learning and hidden layer with dimension equal to the number of classes.
+    Input: Model logits (N, C)
+    Output: Predicted class label for the logits (N, C+1)
+
+    The output layer has one more dimension than the number of classes to account for the probability of being a student or teacher.
+    The output predicts class label for the logits as it appears to be more stable according to the authors.
+    """
+
     def __init__(self, n_class, n_hidden):
         super(logits_D, self).__init__()
         self.n_class = n_class
@@ -38,6 +49,19 @@ class logits_D(nn.Module):
 
 
 class local_emb_D(nn.Module):
+    """
+    Representation Identifier (Embeddings): D_e_Local Embedding Discriminator (Section 3.2)
+    Purpose: Learns a weight matrix that maps the embedding representations of two nodes from the same graph and
+             same model to a real value encoding the affinity between the two.
+             It encourages the student to inherit the local affinity hidden in teacher's node embeddings
+    Description: A parameteric weight matrix that is learned during training.
+    Input: Model embeddings - (N, D)
+    Output: Affinity score - (N, N)
+
+    N: Number of nodes in the graph
+    D: Dimension of the embeddings
+    """
+
     def __init__(self, n_hidden):
         super(local_emb_D, self).__init__()
         self.n_hidden = n_hidden
@@ -53,6 +77,22 @@ class local_emb_D(nn.Module):
 
 
 class global_emb_D(nn.Module):
+    """
+    Representation Identifier (Summary): D_e_Global Embedding Discriminator (Section 3.2)
+    Purpose: Learns a weight matrix that maps the embedding representations of nodes from a model to a
+             summary embedding representation (Mean of the graph'snode embeddings) from a model.
+             Both models could be same or different.
+             It encourages the student to inherit the global affinity
+    Description: A parameteric weight matrix that is learned during training.
+    Input:
+     - Model embeddings - (N, D)
+     - Summary embeddings - (1, D)
+    Output: Affinity score - (N, 1)
+
+    N: Number of nodes in the graph
+    D: Dimension of the embeddings
+    """
+
     def __init__(self, n_hidden):
         super(global_emb_D, self).__init__()
         self.n_hidden = n_hidden
@@ -71,6 +111,18 @@ class global_emb_D(nn.Module):
 
 
 def load_knowledge(kd_path, device):  # load teacher knowledge
+    """
+    Load teacher knowledge from a file.
+    Input:
+     - kd_path: Path to the teacher knowledge file
+     - device: Device to load the knowledge on
+    Output:
+     - tea_logits: Teacher logits (N, C)
+     - tea_h: Teacher embeddings (N, D)
+     - tea_g: Teacher summary embeddings (1, D)
+     - new_ptr: Teacher pointer (N) - cumulative sum of the number of nodes in each graph,
+                                      used to index the nodes in the graph
+    """
     assert os.path.isfile(kd_path), "Please download teacher knowledge first"
     knowledge = torch.load(kd_path, map_location=device)
     tea_logits = knowledge["logits"].float()
@@ -81,6 +133,10 @@ def load_knowledge(kd_path, device):  # load teacher knowledge
 
 
 class AddGraphIdTransform:
+    """
+    Add a graph id to the OGB dataset during loading.
+    """
+
     def __init__(self):
         self.graph_id = 0
 
@@ -91,6 +147,27 @@ class AddGraphIdTransform:
 
 
 class GAKD_trainer:
+    """
+    GAKD Trainer
+
+    This class is responsible for training the student model under the GAKD framework.
+
+    The class is initialized with the following parameters:
+    - student_model_args: Dictionary containing the student model's architecture and training parameters.
+    - teacher_knowledge_path: Path to the teacher knowledge file.
+    - dataset_name: Name of the dataset to use for training.
+    - student_optimizer_lr: Learning rate for the student optimizer.
+    - student_optimizer_weight_decay: Weight decay for the student optimizer.
+    - discriminator_optimizer_lr: Learning rate for the discriminator optimizer.
+    - discriminator_optimizer_weight_decay: Weight decay for the discriminator optimizer.
+    - batch_size: Batch size for training.
+    - num_workers: Number of workers for data loading.
+    - discriminator_update_freq: Frequency of discriminator updates. (K in paper, Section C.1: Experimental Details)
+    - train_discriminator_logits: Whether to train the logits identifier.
+    - train_discriminator_embeddings: Whether to train the embeddings identifier.
+    - epochs: Number of epochs to train for.
+    - seed: Random seed for reproducibility.
+    """
 
     def __init__(
         self,
@@ -137,6 +214,13 @@ class GAKD_trainer:
         self.evaluate_teacher()
 
     def _configure_student_model(self):
+        """
+        Configure the student model.
+        This function sets the embedding dimension and output dimension of the student model.
+        - It also checks for embedding dimension mismatch between teacher and student.
+        - If the embedding dimension is not specified in the student model arguments, it is set to the teacher's embedding dimension.
+        - If the output dimension is not specified in the student model arguments, it is set to the number of tasks in the dataset.
+        """
         if self.student_model_args is not None:
             if self.student_model_args["embedding_dim"] is None:
                 self.student_model_args["embedding_dim"] = self._teacher_h_dim
@@ -160,6 +244,14 @@ class GAKD_trainer:
         )
 
     def _load_dataset(self):
+        """
+        Load the dataset.
+        - It creates the directory for storing the dataset if it doesn't exist.
+        - It adds a graph id to the dataset during loading.
+        - It loads the dataset and splits it into train, validation, and test sets.
+        - It initializes the dataloaders for training, validation, and testing.
+        - It initializes the OGB dataset evaluator for evaluating the model's performance.
+        """
         os.makedirs(f"{base_dir}/data", exist_ok=True)
         self._transform = AddGraphIdTransform()
         self.dataset = PygGraphPropPredDataset(
@@ -175,8 +267,6 @@ class GAKD_trainer:
             batch_size=self.batch_size,
             shuffle=True,
             num_workers=self.num_workers,
-            # pin_memory=True,  # Enables faster data transfer to GPU
-            # persistent_workers=True  # Keeps workers alive between epochs
         )
         self.valid_loader = DataLoader(
             self.dataset[self.split_idx["valid"]],
@@ -194,6 +284,9 @@ class GAKD_trainer:
         self.evaluator = Evaluator(name=self.dataset_name)
 
     def _setup_student_optimizer(self):
+        """
+        Setup the student optimizer.
+        """
         self.student_model = self.student_model.to(self.device)
         self.student_optimizer = optim.Adam(
             self.student_model.parameters(),
@@ -202,6 +295,12 @@ class GAKD_trainer:
         )
 
     def _setup_discriminator(self):
+        """
+        Setup the discriminators.
+        - It initializes the local and global embedding discriminators.
+        - It initializes the logits discriminator.
+        - It sets up the optimizer and label loss criterion for the discriminators.
+        """
         self.discriminator_e_local = local_emb_D(n_hidden=self.embedding_dim).to(
             self.device
         )
@@ -215,18 +314,12 @@ class GAKD_trainer:
             [
                 {
                     "params": self.discriminator_e_local.parameters(),
-                    "lr": self.discriminator_lr,
-                    "weight_decay": self.discriminator_weight_decay,
                 },
                 {
                     "params": self.discriminator_e_global.parameters(),
-                    "lr": self.discriminator_lr,
-                    "weight_decay": self.discriminator_weight_decay,
                 },
                 {
                     "params": self.discriminator_logits.parameters(),
-                    "lr": self.discriminator_lr,
-                    "weight_decay": self.discriminator_weight_decay,
                 },
             ],
             lr=self.discriminator_lr,
@@ -237,6 +330,9 @@ class GAKD_trainer:
         self._train_ids = self.split_idx["train"].to(self.device)
 
     def _set_device(self):
+        """
+        Set the device for training.
+        """
         if torch.cuda.is_available():
             device = torch.device("cuda")
         elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
@@ -248,26 +344,42 @@ class GAKD_trainer:
         self.device = device
 
     def _load_knowledge(self):
+        """
+        Load teacher knowledge.
+        - It checks if the teacher knowledge file exists.
+        - It loads the teacher knowledge and selects the graph indices for the training set.
+        - It initializes the teacher embeddings and logits.
+        """
         print(self.teacher_knowledge_path, os.path.isfile(self.teacher_knowledge_path))
         assert os.path.isfile(
             self.teacher_knowledge_path
         ), "Please download teacher knowledge first"
         knowledge = torch.load(self.teacher_knowledge_path, map_location=self.device)
+
+        # Load teacher logits
         self.teacher_logits = knowledge["logits"].float().to(self.device)
         self.teacher_logits = self.teacher_logits[self.split_idx["train"]]
         print("Teacher logits Dimension: ", self.teacher_logits.shape, flush=True)
         self._teacher_logits_dim = self.teacher_logits.shape[1]
+
+        # Load teacher summary embeddings
         self.teacher_g = knowledge["g-embeddings"].to(self.device)
         self.teacher_g = self.teacher_g[self.split_idx["train"]]
         print("Teacher g (summary) dimension: ", self.teacher_g.shape, flush=True)
         self._teacher_g_dim = self.teacher_g.shape[1]
+
+        # Load teacher ptr: cumulative sum of the number of nodes in each graph,
+        # used to index the nodes in the graph
         self.teacher_ptr = knowledge["ptr"].to(self.device)
+
+        # Load teacher embeddings
         self.teacher_h = knowledge["h-embeddings"].to(self.device)
         pre, post = self.teacher_ptr[:-1], self.teacher_ptr[1:]
         train_pre, train_post = (
             pre[self.split_idx["train"]],
             post[self.split_idx["train"]],
         )
+        # Determine the indices of the nodes in the training set
         self.teacher_h_idx = torch.cat(
             [
                 torch.arange(pre, post)
@@ -278,15 +390,21 @@ class GAKD_trainer:
         self.teacher_h = self.teacher_h[self.teacher_h_idx]
         self._teacher_h_dim = self.teacher_h.shape[1]
         print("Teacher h (embedding) dimension: ", self.teacher_h.shape, flush=True)
+
+        # Calculate the number of nodes in each graph included in the training set
         nodes_count = torch.tensor(
             [(post - pre).item() for pre, post in list(zip(train_pre, train_post))]
         )
+        # Update the teacher ptr to reflect the cumulative sum of the number of nodes in each graph in the training set
         self.teacher_ptr = torch.cat(
             [torch.tensor([0]), torch.cumsum(nodes_count, dim=0)]
         ).to(self.device)
         print("Teacher ptr shape: ", self.teacher_ptr.shape, flush=True)
 
     def evaluate_teacher(self):
+        """
+        Evaluate the teacher logits on the training set using the OGB evaluator.
+        """
         train_y_true = self.dataset[self.split_idx["train"]].y
         train_y_pred = self.teacher_logits
         input_dict = {"y_true": train_y_true, "y_pred": train_y_pred}
@@ -302,6 +420,9 @@ class GAKD_trainer:
             )
 
     def _set_seed(self, seed=42):
+        """
+        Set the seed for reproducibility.
+        """
         np.random.seed(seed)
         torch.manual_seed(seed)
         torch.cuda.manual_seed(seed)
@@ -313,15 +434,35 @@ class GAKD_trainer:
         print(f"Random seed set as {seed}", flush=True)
 
     def _get_batch_idx_from_teacher(self, batch):
+        """
+        Map the batch graph indices to the teacher knowledge graph's indices.
+        - It first maps graph ids of each node in batch to the training set graph's id indexes.
+        - It then extracts the node indices of each graph included in the batch coming from training set
+          using the teacher ptr.
+
+        Returns:
+            batch_graph_idx: Tensor of shape (batch_size,), containing the graph indices of the batch preserving order
+            batch_node_idx: Tensor of shape (batch_size,), containing the node indices of the batch.
+        """
         new_pre = self.teacher_ptr[:-1]
         new_post = self.teacher_ptr[1:]
+        # Map graph ids of each node in batch to training set graph's indices
+        # For e,g
+        # batch_pre, batch_post = [0, 3, 6,.. 12], [3, 6, 9,.. 15], len(batch_pre) = len(batch_post) = 10 + 1 (10 is the number of graphs in training set)
+        # batch.graph_id = [0, 0, 1, 1, 2, 2, 3, 3, 4, 4] <- zero-indexed graph ids for each node in batch
+        # assumed true graph ids are [4, 4, 7, 7, 10, 10, 13, 13, 16, 16]
+        # self._train_ids = [2, 4, 5, 7, 8, 10, 11, 13, 14, 16] <- zero-indexed graph ids for each node in training set
+        # batch_graph_idx = [1, 3, 5, 7, 9] <- indices of the graphs included in the batch,
+        #                                      used to extract the node indices of each graph included in the batch from batch_pre, batch_post
         new_ids = [
             (self._train_ids == batch.graph_id[vid]).nonzero().item()
             for vid in batch.batch
         ]
         batch_graph_idx = torch.tensor(new_ids, device=self.device)
+        # Extract the pre and post indices of the graphs included in the batch
         batch_pre = new_pre[batch_graph_idx]
         batch_post = new_post[batch_graph_idx]
+        # Extract the node indices of each graph included in the batch
         batch_node_idx = torch.cat(
             [
                 torch.arange(pre, post)
@@ -329,74 +470,94 @@ class GAKD_trainer:
             ],
             dim=0,
         ).to(self.device)
+        # Return the unique consecutive graph indices and the node indices of each graph included in the batch
         return torch.unique_consecutive(batch_graph_idx).to(
             self.device
         ), batch_node_idx.to(self.device)
 
     def _train_batch(self, batch, epoch):
+        """
+        Train a single batch of data under the GAKD framework.
+        """
         batch = batch.to(self.device)
         if batch.x.shape[0] == 1 or batch.batch[-1] == 0:
             return 0
 
-        student_batch_pred, student_batch_h = self.student_model(batch)
-        # print("Student batch pred: ", student_batch_pred.shape, flush=True)
-        # print("Student batch h: ", student_batch_h.shape, flush=True)
-        student_batch_g = nng.global_mean_pool(student_batch_h, batch.batch)
+        student_batch_pred, student_batch_h = self.student_model(
+            batch
+        )  # [batch_size, 1], [N, h_dim] where N is the number of nodes in the batch
+        student_batch_g = nng.global_mean_pool(
+            student_batch_h, batch.batch
+        )  # [G, h_dim] where G is the number of graphs in the batch
         self.student_optimizer.zero_grad()
         y_true = batch.y.float()
-        # y_labeled = ~torch.isnan(y_true)
+        # Filter out NAN class labels
         y_labeled = batch.y == batch.y
 
-        # classification loss ===> to be used for logits identifier in training student
+        # classification loss, to be added to student loss for logits identifier in training student
         class_loss = self.class_criterion(
             student_batch_pred.float()[y_labeled], y_true[y_labeled]
         )
-
+        # Get the batch indices from the teacher knowledge
+        # This is used to extract the teacher embeddings and logits for the batch
+        # The teacher embeddings and logits are used to train the discriminator
         batch_graph_idx, batch_node_idx = self._get_batch_idx_from_teacher(batch)
         teacher_batch_h = self.teacher_h[batch_node_idx].to(self.device)
         teacher_batch_g = self.teacher_g[batch_graph_idx].to(self.device)
         teacher_batch_logits = self.teacher_logits[batch_graph_idx].to(self.device)
 
-        #### Train discriminator
+        #### Train discriminator, only update discriminator every self.discriminator_update_freq epochs
         if epoch % self.discriminator_update_freq == 0:
             discriminator_loss = 0
 
             ## train logits identifier: D_l
             if self.train_discriminator_logits:
+                # Section 3.3: Implementation of equation 3 (logits identifier)
                 self.discriminator_logits.train()
                 # detach student logits to avoid backprop through student for discriminator training
                 student_logits = student_batch_pred.detach()
+                # D_l(z_teacher)
                 z_teacher = self.discriminator_logits(teacher_batch_logits)
+                # D_l(z_student)
                 z_student = self.discriminator_logits(student_logits)
+                # Real | D_l(z_teacher)
                 prob_real_given_z = torch.sigmoid(z_teacher[:, -1])
+                # Fake | D_l(z_student)
                 prob_fake_given_z = torch.sigmoid(z_student[:, -1])
+                # logP(Real | D_l(z_teacher)) + logP(Fake | D_l(z_student)) - First half of equation 3
                 adversarial_logits_loss = self.discriminator_loss(
                     prob_real_given_z, torch.ones_like(prob_real_given_z)
                 ) + self.discriminator_loss(
                     prob_fake_given_z, torch.zeros_like(prob_fake_given_z)
                 )
-                # print("Z-teacher: ", z_teacher.shape, flush=True)
-                # print("Z-student: ", z_student.shape, flush=True)
-                # print("Z-teacher[:,:-1]: ", z_teacher[:, :-1].shape, flush=True)
-                # print("Z-student[:,:-1]: ", z_student[:, :-1].shape, flush=True)
-                # print("Y-true: ", y_true.shape, flush=True)
-                # print("Y-labeled: ", y_labeled.shape, flush=True)
+                # logP(y_v | D_l(z_teacher)) where y_v is the true class labels for node v
                 y_v_given_z_pos = self.class_criterion(
                     z_teacher[:, :-1][y_labeled], y_true[y_labeled]
                 )
+                # logP(y_v | D_l(z_student))
                 y_v_given_z_neg = self.class_criterion(
                     z_student[:, :-1][y_labeled], y_true[y_labeled]
                 )
+                # logP(y_v | D_l(z_teacher)) + logP(y_v | D_l(z_student)) - Second half of equation 3
                 label_loss = y_v_given_z_pos + y_v_given_z_neg
+                # Add the adversarial logits loss and label loss to the discriminator loss - equation 3
                 discriminator_loss += 0.5 * (adversarial_logits_loss + label_loss)
 
             ## train local embedding representation identifier: D_e_local
             if self.train_discriminator_embeddings:
+                # Section 3.2: Implementation of equation 1 (local embedding identifier) - Maximization for discriminator
+
+                # Set the local embedding discriminator to train mode
                 self.discriminator_e_local.train()
+                # D_e_local(teacher_embeddings)
                 pos_e = self.discriminator_e_local(teacher_batch_h, batch)
+                # D_e_local(student_embeddings)
                 neg_e = self.discriminator_e_local(student_batch_h.detach(), batch)
+                # Real | D_e_local(teacher_embeddings)
                 prob_real_given_e = torch.sigmoid(pos_e)
+                # Fake | D_e_local(student_embeddings)
                 prob_fake_given_e = torch.sigmoid(neg_e)
+                # J_local = logP(Real | D_e_local(teacher_embeddings)) + logP(Fake | D_e_local(student_embeddings)) - First half of equation 1
                 adverserial_local_e_loss = self.discriminator_loss(
                     prob_real_given_e, torch.ones_like(prob_real_given_e)
                 ) + self.discriminator_loss(
@@ -404,16 +565,23 @@ class GAKD_trainer:
                 )
 
                 ## train global embedding representation identifier: D_e_global
+                # Set the global embedding discriminator to train mode
                 self.discriminator_e_global.train()
+                # Summary teacher (S_teacher)
                 teacher_summary = torch.sigmoid(teacher_batch_g)
+                # D_e_global(teacher_embeddings, S_teacher)
                 e_teacher_summary_teacher = self.discriminator_e_global(
                     teacher_batch_h, teacher_summary, batch
                 )
+                # D_e_global(student_embeddings, S_teacher)
                 e_student_summary_teacher = self.discriminator_e_global(
                     student_batch_h.detach(), teacher_summary, batch
                 )
+                # Real | D_e_global(teacher_embeddings, S_teacher)
                 prob_real_given_e_global = torch.sigmoid(e_teacher_summary_teacher)
+                # Fake | D_e_global(student_embeddings, S_teacher)
                 prob_fake_given_e_global = torch.sigmoid(e_student_summary_teacher)
+                # logP(Real | D_e_global(teacher_embeddings, S_teacher)) + logP(Fake | D_e_global(student_embeddings, S_teacher))
                 adverserial_global_e_loss1 = self.discriminator_loss(
                     prob_real_given_e_global,
                     torch.ones_like(prob_real_given_e_global),
@@ -421,26 +589,35 @@ class GAKD_trainer:
                     prob_fake_given_e_global,
                     torch.zeros_like(prob_fake_given_e_global),
                 )
-
+                # Summary student (S_student)
                 student_summary = torch.sigmoid(student_batch_g)
+                # D_e_global(student_embeddings, S_student)
                 e_student_summary_student = self.discriminator_e_global(
                     student_batch_h.detach(), student_summary.detach(), batch
                 )
+                # D_e_global(teacher_embeddings, S_student)
                 e_teacher_summary_student = self.discriminator_e_global(
                     teacher_batch_h, student_summary.detach(), batch
                 )
+                # logP(Real | D_e_global(student_embeddings, S_student))
                 prob_real_given_e_global = torch.sigmoid(e_student_summary_student)
+                # logP(Fake | D_e_global(teacher_embeddings, S_student))
                 prob_fake_given_e_global = torch.sigmoid(e_teacher_summary_student)
+                # logP(Real | D_e_global(student_embeddings, S_student)) + logP(Fake | D_e_global(teacher_embeddings, S_student))
                 adverserial_global_e_loss2 = self.discriminator_loss(
                     prob_real_given_e_global,
                     torch.ones_like(prob_real_given_e_global),
                 ) + self.discriminator_loss(
                     prob_fake_given_e_global,
-                    torch.ones_like(prob_fake_given_e_global),
+                    torch.zeros_like(prob_fake_given_e_global),
                 )
+                # Equation 1
                 discriminator_loss = (
                     discriminator_loss
+                    # J_local = logP(Real | D_e_local(teacher_embeddings)) + logP(Fake | D_e_local(student_embeddings))
                     + adverserial_local_e_loss
+                    # J_global = logP(Real | D_e_global(teacher_embeddings, S_teacher)) + logP(Fake | D_e_global(student_embeddings, S_teacher))  +
+                    #            logP(Real | D_e_global(student_embeddings, S_student)) + logP(Fake | D_e_global(teacher_embeddings, S_student))
                     + adverserial_global_e_loss1
                     + adverserial_global_e_loss2
                 )
@@ -454,20 +631,27 @@ class GAKD_trainer:
         ## fooling logits discriminator
         if self.train_discriminator_logits:
             self.discriminator_logits.eval()
+            # Section 3.3: Implementation of equation 4 (logits identifier) - Minimization for student
+            # only keeping the student terms
             z_teacher = self.discriminator_logits(teacher_batch_logits)
             z_student = self.discriminator_logits(student_batch_pred)
+            # logP(Fake | D_l(z_student))
             prob_fake_given_z = torch.sigmoid(z_student[:, -1])
+            # logP(Fake | D_l(z_student)) - equation 4
             adversarial_logits_loss = self.discriminator_loss(
                 prob_fake_given_z, torch.ones_like(prob_fake_given_z)
             )
+            # logP(y_v | D_l(z_student))
             label_loss = self.class_criterion(
                 z_student[:, :-1][y_labeled], y_true[y_labeled]
             )
+            # L1 loss
             l1_loss = (
                 torch.norm(student_batch_pred - teacher_batch_logits, p=1)
                 * 1
                 / len(batch.batch)
             )
+            # Equation 4
             student_loss = (
                 student_loss + 0.5 * (adversarial_logits_loss + label_loss) + l1_loss
             )
@@ -475,32 +659,44 @@ class GAKD_trainer:
         ## fooling local embedding representation identifier
         if self.train_discriminator_embeddings:
             self.discriminator_e_local.eval()
+            # only keeping the student terms
             neg_e = self.discriminator_e_local(student_batch_h, batch)
+            # Fake | D_e_local(student_embeddings)
             prob_fake_given_e = torch.sigmoid(neg_e)
+            # logP(Fake | D_e_local(student_embeddings))
             adversarial_local_e_loss = self.discriminator_loss(
                 prob_fake_given_e, torch.ones_like(prob_fake_given_e)
             )
 
             ## fooling global embedding representation identifier
             self.discriminator_e_global.eval()
+            # Summary teacher (S_teacher)
             teacher_summary = torch.sigmoid(teacher_batch_g)
+            # D_e_global(student_embeddings, S_teacher)
             e_student_summary_teacher = self.discriminator_e_global(
                 student_batch_h, teacher_summary, batch
             )
+            # Fake | D_e_global(student_embeddings, S_teacher)
             prob_fake_given_e_global = torch.sigmoid(e_student_summary_teacher)
+            # logP(Fake | D_e_global(student_embeddings, S_teacher))
             adverserial_global_e_loss1 = self.discriminator_loss(
                 prob_fake_given_e_global, torch.ones_like(prob_fake_given_e_global)
             )
-
+            # Summary student (S_student)
             student_summary = torch.sigmoid(student_batch_g)
+            # D_e_global(teacher_embeddings, S_student)
             e_teacher_summary_student = self.discriminator_e_global(
                 teacher_batch_h, student_summary, batch
             )
+            # D_e_global(student_embeddings, S_student)
             e_student_summary_student = self.discriminator_e_global(
                 student_batch_h, student_summary, batch
             )
+            # Real | D_e_global(student_embeddings, S_student)
             prob_real_given_e_global = torch.sigmoid(e_student_summary_student)
+            # Fake | D_e_global(teacher_embeddings, S_student)
             prob_fake_given_e_global = torch.sigmoid(e_teacher_summary_student)
+            # logP(Real | D_e_global(student_embeddings, S_student)) + logP(Fake | D_e_global(teacher_embeddings, S_student))
             adverserial_global_e_loss2 = self.discriminator_loss(
                 prob_real_given_e_global, torch.zeros_like(prob_real_given_e_global)
             ) + self.discriminator_loss(
@@ -520,6 +716,9 @@ class GAKD_trainer:
         return student_loss.item()
 
     def train(self):
+        """
+        Train the student model under the GAKD framework for a given number of epochs.
+        """
         best_valid_ap = 0
         for epoch in range(self.epochs):
             print("Epoch: ", epoch, flush=True)
@@ -554,6 +753,9 @@ class GAKD_trainer:
                     )
 
     def evaluate(self, split="valid"):
+        """
+        Evaluate the student model on the validation or test set.
+        """
         self.student_model.eval()
         loader = self.valid_loader if split == "valid" else self.test_loader
         y_true_list = []
@@ -609,6 +811,9 @@ def run_multiple_experiments(
     output_file=f"{base_dir}/results/gine_student_gakd_molpcba.csv",
     student_model_args=None,
 ):
+    """
+    Run multiple experiments with default or user-defined configurations.
+    """
     results = []
     metric = "ap" if dataset_name == "ogbg-molpcba" else "rocauc"
     for run in range(n_runs):
