@@ -375,6 +375,12 @@ class GAKD_trainer:
                 ) + self.discriminator_loss(
                     prob_fake_given_z, torch.zeros_like(prob_fake_given_z)
                 )
+                # print("Z-teacher: ", z_teacher.shape, flush=True)
+                # print("Z-student: ", z_student.shape, flush=True)
+                # print("Z-teacher[:,:-1]: ", z_teacher[:, :-1].shape, flush=True)
+                # print("Z-student[:,:-1]: ", z_student[:, :-1].shape, flush=True)
+                # print("Y-true: ", y_true.shape, flush=True)
+                # print("Y-labeled: ", y_labeled.shape, flush=True)
                 y_v_given_z_pos = self.class_criterion(
                     z_teacher[:, :-1][y_labeled], y_true[y_labeled]
                 )
@@ -653,7 +659,11 @@ def run_multiple_experiments(
 
         # Save intermediate results after each run
         df = pd.DataFrame(results)
-        df.to_csv(output_file, index=False)
+        # check if output file exists
+        if os.path.exists(output_file):
+            df.to_csv(output_file, index=False, mode="a", header=False)
+        else:
+            df.to_csv(output_file, index=False)
 
         print(f"Run {run + 1} Results:", flush=True)
         print(f"Validation {metric}: {valid_ap:.4f}", flush=True)
@@ -831,7 +841,7 @@ if __name__ == "__main__":
         flush=True,
     )
     if args.output_file is None:
-        file_name = f"{base_dir}/results/gine_student_gakd_{args.dataset_name}_{experiment_type}_discriminator_logits_{args.train_discriminator_logits}_discriminator_embeddings_{args.train_discriminator_embeddings}.csv"
+        file_name = f"{base_dir}/results/gine_student_gakd_{args.dataset_name}_{experiment_type}_discriminator_logits_{args.train_discriminator_logits}_discriminator_embeddings_{args.train_discriminator_embeddings}_k{args.discriminator_update_freq}_wd{args.student_optimizer_weight_decay}_drop{args.student_dropout}.csv"
     else:
         file_name = args.output_file
 
@@ -855,7 +865,6 @@ if __name__ == "__main__":
 
     print(results_df.to_string(), flush=True)
     print("Experiments completed successfully!", flush=True)
-
 
 # srun --export=ALL --pty -p grete-h100 -G H100:1 --cpus-per-task=64 --ntasks=1 python gakd.py --teacher_knowledge_path /mnt/lustre-grete/projects/LLMticketsummarization/muneeb/rand_dir/GraphGPS/teacher_results/teacher-knowledge.pt --epochs 1 --batch_size 128
 # srun --export=ALL --pty -p grete-h100 -G H100:1 --cpus-per-task=64 --ntasks=1 python gakd.py --teacher_knowledge_path /mnt/lustre-grete/projects/LLMticketsummarization/muneeb/rand_dir/GraphGPS/teacher_results/teacher-knowledge.pt --student_virtual_node false  --epochs 1 --batch_size 128
