@@ -36,6 +36,7 @@ from graphgps.finetuning import load_pretrained_model_cfg, init_model_from_pretr
 from graphgps.logger import create_logger
 
 import graphgps.metrics_ogb as metrics_ogb
+from typing import Dict, Iterable, Callable
 
 
 torch.backends.cuda.matmul.allow_tf32 = True  # Default False in PyTorch 1.12+
@@ -133,10 +134,11 @@ def run_loop_settings():
     return run_ids, seeds, split_indices
 
 
-from typing import Dict, Iterable, Callable
-
-
 class EmbeddingsExtractor(torch.nn.Module):
+    """
+    Extract embeddings from a model at specified layers.
+    """
+
     def __init__(self, model: torch.nn.Module, layers: Iterable[str]):
         super().__init__()
         self.model = model
@@ -158,13 +160,14 @@ class EmbeddingsExtractor(torch.nn.Module):
         return self._features
 
 
-def get_embeddings(model, loaders, loggers, cfg):
+def get_embeddings(model, loaders, cfg):
     with torch.no_grad():
         model.eval()
         logging.info("Total number of nodes: " + str(cfg.dataset.num_nodes))
         logging.info("Total number of graphs: " + str(cfg.dataset.num_graphs))
+        # Check if embeddings type is node
         if cfg.embeddings.type and cfg.embeddings.type == "node":
-            # Initialize embeddings on CPU first
+            # Initialize embeddings tensor and nodes count on CPU first
             node_embeddings = torch.zeros(
                 cfg.dataset.num_nodes, int(cfg.gt.dim_hidden), dtype=torch.float32
             )
@@ -173,13 +176,13 @@ def get_embeddings(model, loaders, loggers, cfg):
             )
             nodes_count = torch.zeros(cfg.dataset.num_graphs, 1)
 
-            # Setup extractor
+            # Setup extractor for final layer embeddings
             node_embedding_extractor = EmbeddingsExtractor(
                 model, ["model.layers.4.ff_dropout2"]
             )
 
             device = torch.device(cfg.accelerator)
-
+            # Loop over loaders (train, val, test)
             for loader_idx, loader in enumerate(loaders):
                 logging.info(f"Processing loader {loader_idx + 1}/{len(loaders)}")
 
@@ -191,24 +194,38 @@ def get_embeddings(model, loaders, loggers, cfg):
                     )
 
                     with torch.amp.autocast("cuda", enabled=True):  # Mixed precision
-                        # Get embeddings for current batch
+                        # Get final layerembeddings for current batch
                         h_embeddings = list(node_embedding_extractor(batch).values())[0]
 
                         # Process batch indices
                         ptr = batch.ptr
                         new_pre, new_post = ptr[:-1], ptr[1:]
+                        # Get graph ids for current batch
                         batch_wrt_graph = torch.tensor(
                             [batch.graph_id[g_id].item() for g_id in batch.batch]
                         )
 
-                        # Calculate node indices
-                        node_idx = torch.cat(
+                        # # Calculate node indices for current batch wrt graph
+                        # test code
+                        # graph_ids = torch.tensor([0, 2, 7, 13, 18, 20]) # suppose 6 graphs in loader
+                        # ptr = torch.tensor([0, 3, 6, 9, 15, 21, 24])
+                        # node_count = [3, 3, 3, 6, 6, 3]
+                        # node_indexes = [0,1,2, 3,4,5, 6,7,8, 9,10,11,12,13,14, 15,16,17,18,19,20, 21,22,23]
+                        # batch_graph_ids = torch.tensor([2, 13, 18]) # graph ids for current batch
+                        # batch_ptr = torch.tensor([0, 3, 9, 15]) # ptr for current batch
+                        # batch_ids = torch.tensor([0, 0, 0, 1, 1, 1, 1, 1, 1, 2,2,2,2,2,2])
+                        # # want = [3,4,5, 9,10,11,12,13,14, 15,16,17,18,19,20]
+                        # new_pre, new_post = batch_ptr[:-1], batch_ptr[1:]
+                        # # new_pre = [0, 3, 9]
+                        # # new_post = [3, 9, 15]
+                        # row_ids = torch.cat([torch.arange(post, 2*post - pre) for pre, post in list(zip(new_pre, new_post))])
+                        # # row_ids = [3,4,5, 9,10,11,12,13,14, 15,16,17,18,19,20] == want
+                        row_ids = torch.cat(
                             [
-                                torch.arange(0, post - pre)
+                                torch.arange(post, 2 * post - pre)
                                 for pre, post in list(zip(new_pre, new_post))
                             ]
                         )
-                        row_ids = batch_wrt_graph + node_idx
 
                         # Update embeddings in chunks to save memory
                         chunk_size = 1000  # Adjust based on your GPU memory
@@ -237,7 +254,7 @@ def get_embeddings(model, loaders, loggers, cfg):
                     # Clear cache after each batch
                     torch.cuda.empty_cache()
 
-            # Calculate ptr on CPU
+            # Calculate ptr on CPU - cumulative sum of node count
             ptr = torch.cat([torch.tensor([0]), torch.cumsum(nodes_count, dim=0)[:, 0]])
 
             # Save results
@@ -254,7 +271,6 @@ def get_embeddings(model, loaders, loggers, cfg):
             )
 
             device = torch.device(cfg.accelerator)
-            mismatch_count = 0
             for loader_idx, loader in enumerate(loaders):
                 logging.info(f"Processing loader {loader_idx + 1}/{len(loaders)}")
 
@@ -266,11 +282,15 @@ def get_embeddings(model, loaders, loggers, cfg):
                     batch = batch.to(device)
 
                     with torch.amp.autocast("cuda", enabled=True):
+                        # Get logits embeddings for current batch
                         z_embeddings, _ = model(batch)
+                        # Get graph ids for current batch
                         batch_wrt_graph = torch.tensor(
                             [batch.graph_id[g_id].item() for g_id in batch.batch]
                         )
+                        # Get unique graph ids for current batch
                         unique_graphs = batch_wrt_graph.unique_consecutive()
+                        # Update logits embeddings for current batch
                         logits_embeddings[unique_graphs] = z_embeddings.float().cpu()
 
                     torch.cuda.empty_cache()
@@ -314,6 +334,7 @@ if __name__ == "__main__":
     model = create_model()
     loggers = create_logger()
     if cfg.pretrained.dir:
+        # Load pretrained model provided by the user in config file
         model = init_model_from_pretrained(
             model,
             cfg.pretrained.dir,
@@ -321,7 +342,8 @@ if __name__ == "__main__":
             cfg.pretrained.reset_prediction_head,
             seed=cfg.seed,
         )
-    get_embeddings(model, loaders, loggers, cfg)
+    # Extract embeddings
+    get_embeddings(model, loaders, cfg)
 
 # srun --export=ALL --pty -p grete-h100 -G H100:1 --cpus-per-task=64 --ntasks=1 python embedding.py --cfg teacher_config_pretrained.yaml seed 44 embeddings.type node
 # srun --export=ALL --pty -p grete-h100 -G H100:1 --cpus-per-task=64 --ntasks=1 python embedding.py --cfg teacher_config_pretrained.yaml seed 44 embeddings.type logits
