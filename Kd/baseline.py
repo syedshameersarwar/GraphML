@@ -24,13 +24,16 @@ else:
 
 print(f"Using device: {device}", flush=True)
 
-base_dir = f"/scratch1/users/u12763/Knowledge-distillation/"
+base_dir = os.getenv("BASE_DIR", "/scratch1/users/u12763/Knowledge-distillation/")
 
 if not os.path.exists(base_dir):
     os.makedirs(base_dir, exist_ok=True)
 
 
 def set_seed(seed: int = 42) -> None:
+    """
+    Set the random seed for reproducibility.
+    """
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
@@ -43,6 +46,10 @@ def set_seed(seed: int = 42) -> None:
 
 
 class MLP(nn.Module):
+    """
+    Multi-Layer Perceptron (MLP) for GINENetwork.
+    """
+
     def __init__(self, in_dim, out_dim):
         super().__init__()
         network = [
@@ -58,6 +65,10 @@ class MLP(nn.Module):
 
 
 class OGBMolEmbedding(nn.Module):
+    """
+    OGBMolEmbedding class for embedding molecules using atom and bond encoders.
+    """
+
     def __init__(self, dim):
         super().__init__()
         self.atom_encoder = AtomEncoder(emb_dim=dim)
@@ -71,6 +82,10 @@ class OGBMolEmbedding(nn.Module):
 
 
 class VNAgg(nn.Module):
+    """
+    VNAgg class for aggregating virtual nodes using MLP. Includes trainable epsilon.
+    """
+
     def __init__(self, dim, train_eps=False, eps=0.0):
         super().__init__()
         self.mlp = nn.Sequential(MLP(dim, dim), nn.BatchNorm1d(dim), nn.ReLU())
@@ -92,6 +107,11 @@ class VNAgg(nn.Module):
 
 
 class GlobalPool(nn.Module):
+    """
+    GlobalPool class for global pooling of node embeddings. Supports mean and sum pooling.
+
+    """
+
     def __init__(self, fun):
         super().__init__()
         self.fun = getattr(nng, "global_{}_pool".format(fun.lower()))
@@ -103,6 +123,10 @@ class GlobalPool(nn.Module):
 
 
 class ConvBlock(nn.Module):
+    """
+    GINE ConvBlock with given parameters. Uses GINEConv Layer from torch_geometric.
+    """
+
     def __init__(
         self,
         dim,
@@ -114,6 +138,7 @@ class ConvBlock(nn.Module):
         train_vn_eps=False,
         vn_eps=0.0,
     ):
+
         super().__init__()
         self.conv = nng.GINEConv(MLP(dim, dim), train_eps=True)
         self.bn = nn.BatchNorm1d(dim)
@@ -127,6 +152,9 @@ class ConvBlock(nn.Module):
             self.virtual_node_agg = VNAgg(dim, train_eps=train_vn_eps, eps=vn_eps)
 
     def forward(self, data):
+        """
+        Forward pass for GINE ConvBlock.
+        """
         data = copy(data)
         h, edge_index, edge_attr, batch_idx = (
             data.x,
@@ -134,22 +162,33 @@ class ConvBlock(nn.Module):
             data.edge_attr,
             data.batch,
         )
+        # Add virtual node embeddings to node embeddings
         if self.virtual_node:
             h = h + data.virtual_node[batch_idx]
+        # Apply GINE convolution
         h = self.conv(h, edge_index, edge_attr)
+        # Apply batch normalization
         h = self.bn(h)
+        # Apply activation function if not the last layer
         if not self.last_layer:
             h = self.activation(h)
+        # Apply dropout
         h = F.dropout(h, self.dropout_ratio, training=self.training)
+        # Aggregate virtual nodes if enabled
         if self.virtual_node and self.virtual_node_agg:
             v = self.virtual_node_agg(data.virtual_node, h, batch_idx)
             v = F.dropout(v, self.dropout_ratio, training=self.training)
             data.virtual_node = v
+        # Update node embeddings
         data.x = h
         return data
 
 
 class GINENetwork(nn.Module):
+    """
+    GINENetwork class using ConvBlocks to build the network.
+    """
+
     def __init__(
         self,
         hidden_dim=100,
@@ -161,6 +200,9 @@ class GINENetwork(nn.Module):
         vn_eps=0.0,
         return_embeddings=False,
     ):
+        """
+        Initialize GINENetwork with given parameters. Returns (logits,embeddings) if return_embeddings is True, else returns logits.
+        """
         super().__init__()
         self.return_embeddings = return_embeddings
         convs = [
@@ -185,6 +227,7 @@ class GINENetwork(nn.Module):
             )
         )
         self.network = nn.Sequential(OGBMolEmbedding(hidden_dim), *convs)
+        # Aggregate embeddings using mean pooling and MLP
         self.aggregate = nn.Sequential(
             GlobalPool("mean"),
             MLP(hidden_dim, out_dim),
@@ -195,16 +238,26 @@ class GINENetwork(nn.Module):
             self.v0 = nn.Parameter(torch.zeros(1, hidden_dim), requires_grad=True)
 
     def forward(self, data):
+        """
+        Forward pass for GINENetwork.
+        """
+        # Initialize virtual node embeddings if enabled
         if self.virtual_node:
             data.virtual_node = self.v0.expand(data.num_graphs, self.v0.shape[-1])
         H = self.network(data)
+        # Return embeddings if enabled
         if self.return_embeddings:
             # logits, embeddings
             return self.aggregate(H), H.x
+        # Return logits
         return self.aggregate(H)
 
 
 class GINETrainer:
+    """
+    GINETrainer class for training GINENetwork.
+    """
+
     def __init__(
         self,
         dataset_name="ogbg-molpcba",
@@ -232,8 +285,6 @@ class GINETrainer:
             batch_size=batch_size,
             shuffle=True,
             num_workers=num_workers,
-            # pin_memory=True,  # Enables faster data transfer to GPU
-            # persistent_workers=True  # Keeps workers alive between epochs
         )
         self.valid_loader = DataLoader(
             self.dataset[self.split_idx["valid"]],
@@ -265,11 +316,15 @@ class GINETrainer:
 
         # Initialize evaluator
         self.evaluator = Evaluator(name=self.dataset_name)
+        # Initialize virtual node and epsilon parameters
         self.virtual_node = virtual_node
         self.train_vn_eps = train_vn_eps
         self.vn_eps = vn_eps
 
     def train(self, epochs=100):
+        """
+        Train the GINENetwork.
+        """
         best_valid_ap = 0
         for epoch in range(epochs):
             self.model.train()
@@ -315,6 +370,9 @@ class GINETrainer:
 
     @torch.no_grad()
     def eval(self, split="valid"):
+        """
+        Evaluate the GINENetwork on the validation or test set.
+        """
         self.model.eval()
         loader = self.valid_loader if split == "valid" else self.test_loader
         y_true_list = []
@@ -439,7 +497,10 @@ def run_multiple_experiments(
 
         # Save intermediate results after each run
         df = pd.DataFrame(results)
-        df.to_csv(output_file, index=False)
+        if os.path.exists(output_file):
+            df.to_csv(output_file, index=False, mode="a", header=False)
+        else:
+            df.to_csv(output_file, index=False)
 
         print(f"Run {run + 1} Results:", flush=True)
         print(f"Validation {metric}: {valid_ap:.4f}", flush=True)
