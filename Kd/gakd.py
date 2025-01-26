@@ -15,7 +15,10 @@ import pandas as pd
 from datetime import datetime
 import torch_geometric.nn as nng
 
-base_dir = os.getenv("BASE_DIR", "/scratch1/users/u12763/Knowledge-distillation/")
+base_dir = os.getenv(
+    "BASE_DIR",
+    f"/mnt/lustre-grete/projects/LLMticketsummarization/muneeb/rand_dir/GakD",
+)
 if not os.path.exists(base_dir):
     os.makedirs(base_dir, exist_ok=True)
 
@@ -446,19 +449,21 @@ class GAKD_trainer:
         """
         new_pre = self.teacher_ptr[:-1]
         new_post = self.teacher_ptr[1:]
-        # Map graph ids of each node in batch to training set graph's indices
+       # Map graph ids of each node in batch to training set graph's indices
         # For e,g
-        # batch_pre, batch_post = [0, 3, 6,.. 12], [3, 6, 9,.. 15], len(batch_pre) = len(batch_post) = 10 + 1 (10 is the number of graphs in training set)
-        # batch.graph_id = [0, 0, 1, 1, 2, 2, 3, 3, 4, 4] <- zero-indexed graph ids for each node in batch
+        # new_pre, new_post = [0, 3, 6,.. 12], [3, 6, 9,.. 15], len(new_pre) = len(new_post) = 10 + 1 (10 is the number of graphs in training set)
+        # batch.batch = [0, 0, 1, 1, 2, 2, 3, 3, 4, 4] <- zero-indexed graph ids for each node in batch
         # assumed true graph ids are [4, 4, 7, 7, 10, 10, 13, 13, 16, 16]
         # self._train_ids = [2, 4, 5, 7, 8, 10, 11, 13, 14, 16] <- zero-indexed graph ids for each node in training set
         # batch_graph_idx = [1, 3, 5, 7, 9] <- indices of the graphs included in the batch,
         #                                      used to extract the node indices of each graph included in the batch from batch_pre, batch_post
+        # batch_pre, batch_post = selected from new_pre, new_post for only the graphs included in the batch using batch_graph_idx
         new_ids = [
             (self._train_ids == batch.graph_id[vid]).nonzero().item()
             for vid in batch.batch
         ]
-        batch_graph_idx = torch.tensor(new_ids, device=self.device)
+        # batch_graph_idx = torch.tensor(new_ids, device=self.device)
+        batch_graph_idx = torch.tensor(new_ids, device=self.device).unique_consecutive()
         # Extract the pre and post indices of the graphs included in the batch
         batch_pre = new_pre[batch_graph_idx]
         batch_post = new_post[batch_graph_idx]
@@ -471,9 +476,7 @@ class GAKD_trainer:
             dim=0,
         ).to(self.device)
         # Return the unique consecutive graph indices and the node indices of each graph included in the batch
-        return torch.unique_consecutive(batch_graph_idx).to(
-            self.device
-        ), batch_node_idx.to(self.device)
+        return batch_graph_idx.to(self.device), batch_node_idx.to(self.device)
 
     def _train_batch(self, batch, epoch):
         """
@@ -502,9 +505,20 @@ class GAKD_trainer:
         # This is used to extract the teacher embeddings and logits for the batch
         # The teacher embeddings and logits are used to train the discriminator
         batch_graph_idx, batch_node_idx = self._get_batch_idx_from_teacher(batch)
+    
         teacher_batch_h = self.teacher_h[batch_node_idx].to(self.device)
         teacher_batch_g = self.teacher_g[batch_graph_idx].to(self.device)
         teacher_batch_logits = self.teacher_logits[batch_graph_idx].to(self.device)
+
+        assert (
+            teacher_batch_h.shape == student_batch_h.shape
+        ), "Teacher and student batch h shapes do not match"
+        assert (
+            teacher_batch_g.shape == student_batch_g.shape
+        ), "Teacher and student batch g shapes do not match"
+        assert (
+            teacher_batch_logits.shape == student_batch_pred.shape
+        ), "Teacher and student batch logits shapes do not match"
 
         #### Train discriminator, only update discriminator every self.discriminator_update_freq epochs
         if epoch % self.discriminator_update_freq == 0:
