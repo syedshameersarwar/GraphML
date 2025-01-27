@@ -739,18 +739,19 @@ class GAKD_trainer:
             self.student_model.train()
             train_loss = 0
             for batch_idx, batch in enumerate(self.train_loader):
-                print(
-                    "Processing training batch {}/{}, size: {}".format(
-                        batch_idx + 1, len(self.train_loader), batch.y.shape[0]
-                    ),
-                    flush=True,
-                )
+                if (batch_idx + 1) % 100 == 0:
+                    print(
+                        "Processing training batch {}/{}, size: {}".format(
+                            batch_idx + 1, len(self.train_loader), batch.y.shape[0]
+                        ),
+                        flush=True,
+                    )
                 batch_loss = self._train_batch(batch, epoch)
                 train_loss += batch_loss
 
             train_loss /= len(self.train_loader)
 
-            if epoch % max(1, self.epochs // 10) == 0:
+            if (epoch + 1) % max(1, self.epochs // 5) == 0:
                 valid_ap = self.evaluate(split="valid")
                 print(
                     f"Epoch {epoch+1}, Train Loss: {train_loss:.4f}, Valid AP: {valid_ap:.4f}",
@@ -765,6 +766,7 @@ class GAKD_trainer:
                         self.student_model.state_dict(),
                         f"{base_dir}/models/gine_student_kd_{self.dataset_name}_{time.strftime('%Y-%m-%d_%H-%M-%S')}.pt",
                     )
+
 
     def evaluate(self, split="valid"):
         """
