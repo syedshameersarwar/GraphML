@@ -449,7 +449,7 @@ class GAKD_trainer:
         """
         new_pre = self.teacher_ptr[:-1]
         new_post = self.teacher_ptr[1:]
-       # Map graph ids of each node in batch to training set graph's indices
+        # Map graph ids of each node in batch to training set graph's indices
         # For e,g
         # new_pre, new_post = [0, 3, 6,.. 12], [3, 6, 9,.. 15], len(new_pre) = len(new_post) = 10 + 1 (10 is the number of graphs in training set)
         # batch.batch = [0, 0, 1, 1, 2, 2, 3, 3, 4, 4] <- zero-indexed graph ids for each node in batch
@@ -505,7 +505,7 @@ class GAKD_trainer:
         # This is used to extract the teacher embeddings and logits for the batch
         # The teacher embeddings and logits are used to train the discriminator
         batch_graph_idx, batch_node_idx = self._get_batch_idx_from_teacher(batch)
-    
+
         teacher_batch_h = self.teacher_h[batch_node_idx].to(self.device)
         teacher_batch_g = self.teacher_g[batch_graph_idx].to(self.device)
         teacher_batch_logits = self.teacher_logits[batch_graph_idx].to(self.device)
@@ -649,7 +649,7 @@ class GAKD_trainer:
             # only keeping the student terms
             z_teacher = self.discriminator_logits(teacher_batch_logits)
             z_student = self.discriminator_logits(student_batch_pred)
-            # logP(Fake | D_l(z_student))
+            # Fake | D_l(z_student)
             prob_fake_given_z = torch.sigmoid(z_student[:, -1])
             # logP(Fake | D_l(z_student)) - equation 4
             adversarial_logits_loss = self.discriminator_loss(
@@ -735,11 +735,11 @@ class GAKD_trainer:
         """
         best_valid_ap = 0
         for epoch in range(self.epochs):
-            print("Epoch: ", epoch, flush=True)
+            print("Epoch: ", epoch + 1, flush=True)
             self.student_model.train()
             train_loss = 0
             for batch_idx, batch in enumerate(self.train_loader):
-                if (batch_idx + 1) % 100 == 0:
+                if batch_idx  % 100 == 0:
                     print(
                         "Processing training batch {}/{}, size: {}".format(
                             batch_idx + 1, len(self.train_loader), batch.y.shape[0]
@@ -751,7 +751,7 @@ class GAKD_trainer:
 
             train_loss /= len(self.train_loader)
 
-            if (epoch + 1) % max(1, self.epochs // 5) == 0:
+            if epoch % 5 == 0:
                 valid_ap = self.evaluate(split="valid")
                 print(
                     f"Epoch {epoch+1}, Train Loss: {train_loss:.4f}, Valid AP: {valid_ap:.4f}",
@@ -766,7 +766,6 @@ class GAKD_trainer:
                         self.student_model.state_dict(),
                         f"{base_dir}/models/gine_student_kd_{self.dataset_name}_{time.strftime('%Y-%m-%d_%H-%M-%S')}.pt",
                     )
-
 
     def evaluate(self, split="valid"):
         """
