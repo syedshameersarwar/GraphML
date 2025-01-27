@@ -739,7 +739,7 @@ class GAKD_trainer:
             self.student_model.train()
             train_loss = 0
             for batch_idx, batch in enumerate(self.train_loader):
-                if batch_idx  % 100 == 0:
+                if batch_idx % 100 == 0:
                     print(
                         "Processing training batch {}/{}, size: {}".format(
                             batch_idx + 1, len(self.train_loader), batch.y.shape[0]
@@ -857,6 +857,7 @@ def run_multiple_experiments(
         run_results = {
             "experiment_id": f"student_gine_gakd_{dataset_name}_{include_vn_student}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
             "dataset_name": dataset_name,
+            "seed": seed,
             "run": run + 1,
             "train_discriminator_logits": train_discriminator_logits,
             "train_discriminator_embeddings": train_discriminator_embeddings,
@@ -878,9 +879,11 @@ def run_multiple_experiments(
         results.append(run_results)
 
         # Save intermediate results after each run
-        df = pd.DataFrame(results)
+        df = pd.DataFrame([run_results])
         # check if output file exists
         if os.path.exists(output_file):
+            with open(output_file, "a") as f:
+                f.write("\n")
             df.to_csv(output_file, index=False, mode="a", header=False)
         else:
             df.to_csv(output_file, index=False)
@@ -1061,7 +1064,7 @@ if __name__ == "__main__":
         flush=True,
     )
     if args.output_file is None:
-        file_name = f"{base_dir}/results/gine_student_gakd_{args.dataset_name}_{experiment_type}_discriminator_logits_{args.train_discriminator_logits}_discriminator_embeddings_{args.train_discriminator_embeddings}_k{args.discriminator_update_freq}_wd{args.student_optimizer_weight_decay}_drop{args.student_dropout}.csv"
+        file_name = f"{base_dir}/results/gine_student_gakd_{args.dataset_name}_{experiment_type}_virtual_node_discriminator_logits_{args.train_discriminator_logits}_discriminator_embeddings_{args.train_discriminator_embeddings}_k{args.discriminator_update_freq}_wd{args.student_optimizer_weight_decay}_drop{args.student_dropout}.csv"
     else:
         file_name = args.output_file
 
@@ -1085,9 +1088,3 @@ if __name__ == "__main__":
 
     print(results_df.to_string(), flush=True)
     print("Experiments completed successfully!", flush=True)
-
-# srun --export=ALL --pty -p grete-h100 -G H100:1 --cpus-per-task=64 --ntasks=1 python gakd.py --teacher_knowledge_path /mnt/lustre-grete/projects/LLMticketsummarization/muneeb/rand_dir/GraphGPS/teacher_results/teacher-knowledge.pt --epochs 1 --batch_size 128
-# srun --export=ALL --pty -p grete-h100 -G H100:1 --cpus-per-task=64 --ntasks=1 python gakd.py --teacher_knowledge_path /mnt/lustre-grete/projects/LLMticketsummarization/muneeb/rand_dir/GraphGPS/teacher_results/teacher-knowledge.pt --student_virtual_node false  --epochs 1 --batch_size 128
-
-# srun --export=ALL --pty -p grete-h100 -G H100:1 --cpus-per-task=64 --ntasks=1 python gakd.py --teacher_knowledge_path /mnt/lustre-grete/projects/LLMticketsummarization/muneeb/rand_dir/GraphGPS/teacher_results/teacher-knowledge.pt --epochs 1 --train_discriminator_embeddings false
-# srun --export=ALL --pty -p grete-h100 -G H100:1 --cpus-per-task=64 --ntasks=1 python gakd.py --teacher_knowledge_path /mnt/lustre-grete/projects/LLMticketsummarization/muneeb/rand_dir/GraphGPS/teacher_results/teacher-knowledge.pt --epochs 1 --train_discriminator_logits false
