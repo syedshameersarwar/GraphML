@@ -482,6 +482,7 @@ def run_multiple_experiments(
             "experiment_id": experiment_id,
             "dataset_name": dataset_name,
             "run": run + 1,
+            "seed": seed + run,
             "num_layers": num_layers,
             "hidden_dim": hidden_dim,
             "dropout": dropout,
@@ -499,8 +500,11 @@ def run_multiple_experiments(
         results.append(run_results)
 
         # Save intermediate results after each run
-        df = pd.DataFrame(results)
+        df = pd.DataFrame([run_results])
+        # check if output file exists
         if os.path.exists(output_file):
+            with open(output_file, "a") as f:
+                f.write("\n")
             df.to_csv(output_file, index=False, mode="a", header=False)
         else:
             df.to_csv(output_file, index=False)
@@ -626,7 +630,7 @@ if __name__ == "__main__":
         flush=True,
     )
     if args.output_file is None:
-        output_file = f"{base_dir}/results/gine_results_{args.dataset_name}_{'virtual_nodes' if virtual_node else 'no_virtual_nodes'}.csv"
+        output_file = f"{base_dir}/results/gine_results_{args.dataset_name}_{experiment_type}_virtual_node.csv"
     else:
         output_file = args.output_file
 
