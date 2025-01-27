@@ -24,7 +24,10 @@ else:
 
 print(f"Using device: {device}", flush=True)
 
-base_dir = os.getenv("BASE_DIR", "/scratch1/users/u12763/Knowledge-distillation/")
+base_dir = os.getenv(
+    "BASE_DIR",
+    f"/mnt/lustre-grete/projects/LLMticketsummarization/muneeb/rand_dir/GakD",
+)
 
 if not os.path.exists(base_dir):
     os.makedirs(base_dir, exist_ok=True)
