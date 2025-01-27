@@ -345,10 +345,13 @@ def preformat_MalNetTiny(dataset_dir, feature_set):
 class AddGraphIdTransform:
     def __init__(self):
         self.graph_id = 0
+        self.node_count = 0
 
     def __call__(self, data):
         data.graph_id = self.graph_id
         self.graph_id += 1
+        data.node_idx = [i + self.node_count for i in range(data.num_nodes)]
+        self.node_count += data.num_nodes
         return data
 
 
